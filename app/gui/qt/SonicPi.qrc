@@ -16,6 +16,7 @@
         <file>images/align.png</file>
         <file>images/size_down.png</file>
         <file>images/size_up.png</file>
+        <file>images/scope.png</file>
         <file>images/splash@2x.png</file>
         <file>images/splash.png</file>
         <file>images/icon.png</file>
@@ -45,12 +46,17 @@
         <file>images/tutorial/articles/A.08-minecraft-vj/minecraft-vj-0-small.png</file>
         <file>images/tutorial/articles/A.08-minecraft-vj/minecraft-vj-1-small.png</file>
         <file>images/tutorial/articles/A.02-live-coding/sam-aaron-live-coding.png</file>
+        <file>images/tutorial/articles/A.12-sample-slicing/amen_slice.png</file>
+        <file>images/tutorial/articles/A.14-amplitude-modulation/slicer_control_waves.png</file>
+        <file>images/tutorial/articles/A.14-amplitude-modulation/slicer_phase_durations.png</file>
 
         <file>images/coreteam/samaaron.png</file>
         <file>images/coreteam/josephwilk.png</file>
         <file>images/coreteam/xavierriley.png</file>
         <file>images/coreteam/jweather.png</file>
         <file>images/coreteam/hannozulla.png</file>
+        <file>images/coreteam/luislloret.png</file>
+        <file>images/coreteam/acheater.png</file>
 
         <file>html/doc.html</file>
         <file>html/info.html</file>
@@ -67,7 +73,12 @@
         <file>lang/sonic-pi_fr.qm</file>
         <file>lang/sonic-pi_es.qm</file>
         <file>lang/sonic-pi_hu.qm</file>
+
+        <file>fonts/Hack-Regular.ttf</file>
+        <file>fonts/Hack-Italic.ttf</file>
+<!--
         <file>lang/sonic-pi_zh-Hans.qm</file>
         <file>lang/sonic-pi_zh-Hant.qm</file>
+-->
     </qresource>
 </RCC>

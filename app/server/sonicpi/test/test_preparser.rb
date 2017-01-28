@@ -21,6 +21,12 @@ module SonicPi
       assert_equal(a, PreParser.preparse(a))
     end
 
+    def test_basic_ring_change_w_frozen_string
+      a = "(ring 50, 60, 70)".freeze
+      b = " ring(50, 60, 70)"
+      assert_equal(b, PreParser.preparse(a))
+    end
+
     def test_basic_ring_change
       a = "(ring 50, 60, 70)"
       b = " ring(50, 60, 70)"
@@ -74,6 +80,12 @@ module SonicPi
     def test_sp_sym_basic_expansion
       a = "foo :baz:quux eggs"
       b = "foo ::SonicPi::SPSym.new([:baz, :quux]) eggs"
+      assert_equal(b, PreParser.preparse(a))
+    end
+
+    def test_sp_sym_multiterm_expansion
+      a = "foo :baz:quux:bar:beans eggs"
+      b = "foo ::SonicPi::SPSym.new([:baz, :quux, :bar, :beans]) eggs"
       assert_equal(b, PreParser.preparse(a))
     end
 

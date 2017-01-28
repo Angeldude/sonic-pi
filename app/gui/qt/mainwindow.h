@@ -21,6 +21,7 @@
 #include <QLabel>
 #include <QSplashScreen>
 #include <QCheckBox>
+#include <QPixmap>
 #include <QRadioButton>
 #include <QListWidgetItem>
 #include <QListWidget>
@@ -38,6 +39,8 @@
 #include <fstream>
 #include <QSignalMapper>
 #include "sonicpitheme.h"
+#include "scope.h"
+#include "oscsender.h"
 
 class QAction;
 class QMenu;
@@ -97,6 +100,7 @@ private slots:
     void printAsciiArtLogo();
     void unhighlightCode();
     void runCode();
+    void runBufferIdx(int idx);
     void update_mixer_invert_stereo();
     void update_mixer_force_mono();
     void update_check_updates();
@@ -105,8 +109,6 @@ private slots:
     void disableCheckUpdates();
     void stopCode();
     void beautifyCode();
-    void newlineAndIndent(SonicPiScintilla *ws);
-    void returnAndIndentLine(QObject *ws);
     void completeSnippetListOrIndentLine(QObject *ws);
     void completeSnippetOrIndentCurrentLineOrSelection(SonicPiScintilla *ws);
     void toggleCommentInCurrentWorkspace();
@@ -125,16 +127,22 @@ private slots:
     bool loadFile();
     bool saveAs();
     void about();
+    void scope();
+    void toggleScope();
     void help();
     void onExitCleanup();
     void toggleRecording();
     void toggleRecordingOnIcon();
-    void changeRPSystemVol(int val);
+    void changeRPSystemVol(int val, int silent=0);
     void changeGUITransparency(int val);
     void setRPSystemAudioAuto();
     void setRPSystemAudioHeadphones();
     void setRPSystemAudioHDMI();
     void changeShowLineNumbers();
+    void toggleScope(QWidget* qw);
+    void toggleLeftScope();
+    void toggleRightScope();
+    void toggleScopeAxes();
     void toggleDarkMode();
     void updateDarkMode();
     void showPrefsPane();
@@ -145,6 +153,7 @@ private slots:
     void setMessageBoxStyle();
     void startupError(QString msg);
     void replaceBuffer(QString id, QString content, int line, int index, int first_line);
+    void replaceBufferIdx(int buf_idx, QString content, int line, int index, int first_line);
     void replaceLines(QString id, QString content, int first_line, int finish_line, int point_line, int point_index);
     void tabNext();
     void tabPrev();
@@ -159,6 +168,7 @@ private slots:
     void toggleFullScreenMode();
     void updateFocusMode();
     void toggleFocusMode();
+    void toggleScopePaused();
     void updateLogVisibility();
     void toggleLogVisibility();
     void updateTabsVisibility();
@@ -177,13 +187,14 @@ private slots:
     void setupWindowStructure();
     void setupTheme();
     void escapeWorkspaces();
+    void allJobsCompleted();
 
 private:
 
+    void checkPort(int port);
     QString osDescription();
     void setupLogPathAndRedirectStdOut();
     QSignalMapper *signalMapper;
-    QSignalMapper *retSignalMapper;
     void startRubyServer();
     bool waitForServiceSync();
     void clearOutputPanels();
@@ -191,6 +202,7 @@ private:
     void createToolBar();
     void createStatusBar();
     void createInfoPane();
+    void createScopePane();
     void readSettings();
     void writeSettings();
     void loadFile(const QString &fileName, SonicPiScintilla* &text);
@@ -225,6 +237,7 @@ private:
     QTcpSocket *clientSock;
     QFuture<void> osc_thread, server_thread;
     int protocol;
+    int gui_listen_to_server_port, gui_send_to_server_port, server_listen_to_gui_port, server_send_to_gui_port, scsynth_port, scsynth_send_port, server_osc_cues_port;
     bool focusMode;
     bool startup_error_reported;
     bool is_recording;
@@ -253,6 +266,7 @@ private:
     QTextBrowser *docPane;
 //  QTextBrowser *hudPane;
     QWidget *mainWidget;
+    QDockWidget *scopeWidget;
     bool hidingDocPane;
     bool restoreDocPane;
 
@@ -284,6 +298,13 @@ private:
     QCheckBox *show_buttons;
     QCheckBox *show_tabs;
     QCheckBox *check_updates;
+
+    QSignalMapper *scopeSignalMap;
+//    QCheckBox *show_left_scope;
+//    QCheckBox *show_right_scope;
+    QCheckBox *show_scope_axes;
+    QCheckBox *show_scopes;
+
     QPushButton *check_updates_now;
     QPushButton *visit_sonic_pi_net;
     QLabel *update_info;
@@ -291,7 +312,7 @@ private:
     QRadioButton *rp_force_audio_hdmi;
     QRadioButton *rp_force_audio_default;
     QRadioButton *rp_force_audio_headphones;
-    QSlider *rp_system_vol;
+    QSlider *system_vol_slider;
     QSlider *gui_transparency_slider;
 
     QWidget *infoWidg;
@@ -305,7 +326,7 @@ private:
     std::ofstream stdlog;
 
     SonicPiAPIs *autocomplete;
-    QString sample_path, log_path, sp_user_path, sp_user_tmp_path, ruby_server_path, ruby_path, server_error_log_path, server_output_log_path, gui_log_path, scsynth_log_path;
+    QString sample_path, log_path, sp_user_path, sp_user_tmp_path, ruby_server_path, ruby_path, server_error_log_path, server_output_log_path, gui_log_path, scsynth_log_path, init_script_path, exit_script_path, tmp_file_store, process_log_path, port_discovery_path, qt_app_theme_path, qt_browser_dark_css, qt_browser_light_css;
     QString defaultTextBrowserStyle;
 
     QString version;
@@ -316,9 +337,12 @@ private:
     QSplitter *docsplit;
 
     QLabel *versionLabel;
-
+    Scope* scopeInterface;
     QString guiID;
-    bool homeDirWritable;
+    bool homeDirWritable, tmpFileStoreAvailable;
+    bool updated_dark_mode_for_help, updated_dark_mode_for_prefs;
+
+    OscSender *oscSender;
 };
 
 #endif

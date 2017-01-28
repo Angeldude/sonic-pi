@@ -13,8 +13,10 @@
 require_relative "util"
 require_relative "server"
 require_relative "note"
+require_relative "samplebuffer"
 
 require 'set'
+require 'fileutils'
 
 module SonicPi
   class Studio
@@ -22,84 +24,63 @@ module SonicPi
     class StudioCurrentlyRebootingError < StandardError ; end
     include Util
 
-    attr_reader :synth_group, :fx_group, :mixer_group, :recording_group, :mixer_id, :mixer_bus, :mixer, :max_concurrent_synths, :rand_buf_id, :amp, :rebooting
+    attr_reader :synth_group, :fx_group, :mixer_group, :monitor_group, :mixer_id, :mixer_bus, :mixer, :rand_buf_id, :amp, :rebooting
 
     attr_accessor :cent_tuning
 
-    def initialize(hostname, port, msg_queue, max_concurrent_synths)
+    def initialize(hostname, ports, msg_queue)
       @hostname = hostname
-      @port = port
+      @scsynth_port = ports[:scsynth_port]
+      @scsynth_send_port = ports[:scsynth_send_port]
+      @osc_cues_port = ports[:osc_cues_port]
+      @osc_midi_port = ports[:osc_midi_port]
       @msg_queue = msg_queue
-      @max_concurrent_synths = max_concurrent_synths
       @error_occured_mutex = Mutex.new
       @error_occurred_since_last_check = false
       @sample_sem = Mutex.new
       @reboot_mutex = Mutex.new
       @rebooting = false
       @cent_tuning = 0
-      @reboot_queue = Queue.new
-      @reboot_queue << :check
+      @sample_format = "int16"
+      @paused = false
+      @cached_buffer_dir = Dir.mktmpdir
+
 
       init_studio
+      init_midi
       reset_server
+    end
 
-      @server_rebooter = Thread.new do
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, "server checker")
-        Thread.current.priority = 300
-        Kernel.sleep 10
-        loop do
-          vs = []
-          vs << @reboot_queue.pop
-          # drain any other messages
-          @reboot_queue.size.times {vs << @reboot_queue.pop}
-          begin
-            if vs.include? :reboot
-              begin
-                server_reboot
-                Kernel.sleep 10
-                @reboot_queue << :check
-              rescue Exception => e
-                message "Error rebooting server:  #{e}, #{e.backtrace}"
-                message "Attempting to reboot again in 10s"
-                begin
-                  message "Forcing shutdown of any running server"
-                  @server.shutdown
-                rescue Exception => e
-                  message "Error shutting down server:  #{e}, #{e.backtrace}"
-                end
-                Kernel.sleep 10
-                @reboot_queue << :reboot
-              end
-            else
-              begin
-                if @server.status(5)
-                  # server is alive
-                  # check again in 5 seconds...
-                  Thread.new do
-                    Kernel.sleep 5
-                    @reboot_queue << :check
-                  end
-                else
-                  message "Sound server is down. Rebooting..."
-                  @reboot_queue << :reboot
-                end
-              rescue Exception => e
-                message "Error communicating with sound server. Rebooting...  #{e}, #{e.backtrace}"
-                @reboot_queue <<  :reboot
-              end
-            end
-          rescue Exception => e
-            message "Error in reboot thread: #{e}, #{e.backtrace}"
-          end
-        end
+    def init_midi
+      message "Initialising MIDI"
+      kill_and_deregister_process @o2m_pid if @o2m_pid
+      kill_and_deregister_process @m2o_pid if @m2o_pid
+
+      begin
+        @m2o_pid = spawn("'#{osmid_m2o_path}'" + " -o #{@osc_cues_port} -m", out: osmid_m2o_log_path, err: osmid_m2o_log_path)
+        register_process(@m2o_pid)
+      rescue Exception => e
+        STDERR.puts "Exception when starting osmid m2o"
+        STDERR.puts e.message
+        STDERR.puts e.backtrace.inspect
+        STDERR.puts e.backtrace
+      end
+
+      begin
+        @o2m_pid = spawn("'#{osmid_o2m_path}'" + " -i #{@osc_midi_port} -O #{@osc_cues_port} -m", out: osmid_o2m_log_path, err: osmid_o2m_log_path)
+        register_process(@o2m_pid)
+      rescue Exception => e
+        STDERR.puts "Exception when starting osmid o2m"
+        STDERR.puts e.message
+        STDERR.puts e.backtrace.inspect
+        STDERR.puts e.backtrace
       end
     end
 
     def init_studio
-      message "Initializing..."
       @amp = [0.0, 1.0]
 
-      server = Server.new(@hostname, @port, @msg_queue)
+      server = Server.new(@hostname, @scsynth_port, @scsynth_send_port, @msg_queue)
       server.load_synthdefs(synthdef_path)
       server.add_event_handler("/sonic-pi/amp", "/sonic-pi/amp") do |payload|
         @amp = [payload[2], payload[3]]
@@ -114,12 +95,17 @@ module SonicPi
       end
 
       # load rand stream directly - ensuring it doesn't get considered as a 'sample'
-      rand_buf_id = server.buffer_alloc_read(buffers_path + "/rand-stream.wav").to_i
+      rand_buf = server.buffer_alloc_read(buffers_path + "/rand-stream.wav")
+
+      @sample_sem.synchronize do
+        @buffers = {}
+      end
+
       old_samples = @samples
       @samples = {}
 
       Thread.new do
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, "Studio sample loader")
+        __system_thread_locals.set_local(:sonic_pi_local_thread_group, "Studio sample loader")
         Thread.current.priority = -10
         (old_samples || {}).each do |k, v|
           message "Reloading sample - #{unify_tilde_dir(k)}"
@@ -128,11 +114,11 @@ module SonicPi
       end
 
 
-
       @recorders = {}
       @recording_mutex = Mutex.new
       @server = server
-      @rand_buf_id = rand_buf_id
+      rand_buf.wait_for_allocation
+      @rand_buf_id = rand_buf.to_i
     end
 
     def error_occurred?
@@ -146,12 +132,65 @@ module SonicPi
       end
     end
 
+    def scsynth_info
+      @server.scsynth_info
+    end
+
+    def allocate_buffer(name, duration_in_seconds=nil)
+      check_for_server_rebooting!(:allocate_buffer)
+      name = name.to_sym
+      cached_buffer = @buffers[name]
+      return [cached_buffer, true] if cached_buffer && (!duration_in_seconds || (cached_buffer.duration == duration_in_seconds))
+
+      # we can't just return a cached buffer - so grab the semaphore and
+      # let's play...
+      @sample_sem.synchronize do
+        cached_buffer = @buffers[name]
+        return [cached_buffer, true] if cached_buffer && (!duration_in_seconds || (cached_buffer.duration == duration_in_seconds))
+
+        duration_in_seconds ||= 8
+        # our buffer has the same name but is of a different duration
+        # therefore nuke it
+
+
+        path = @cached_buffer_dir + "/#{name}.wav"
+        # now actually allocate a new buffer and cache it
+        sample_rate = @server.scsynth_info[:sample_rate]
+        buffer_info = @server.buffer_alloc(duration_in_seconds * sample_rate, 2)
+        buffer_info.wait_for_allocation
+        buffer_info.path = path
+        save_buffer!(buffer_info, path)
+        @buffers[name] = buffer_info
+        @server.buffer_free(cached_buffer) if cached_buffer
+        return [buffer_info, false]
+      end
+    end
+
+    def free_buffer(name)
+      check_for_server_rebooting!(:free_buffer)
+      name = name.to_sym
+
+      if @buffers[name]
+        @sample_sem.synchronize do
+          if @buffers[name]
+            @server.buffer_free(@buffers[name])
+            @buffers.delete(name)
+          end
+        end
+        return true
+      end
+
+      false
+    end
+
     def load_synthdefs(path, server=@server)
       check_for_server_rebooting!(:load_synthdefs)
       internal_load_synthdefs(path, server)
     end
 
     def sample_loaded?(path)
+      return true if path.is_a?(Buffer)
+      path = File.expand_path(path)
       return @samples.has_key?(path)
     end
 
@@ -164,6 +203,7 @@ module SonicPi
       check_for_server_rebooting!(:free_sample)
       @sample_sem.synchronize do
         paths.each do |p|
+          p = File.expand_path(p)
           info = @samples[p]
           @samples.delete(p)
           server.buffer_free(info) if info
@@ -186,20 +226,22 @@ module SonicPi
     def start_amp_monitor
       check_for_server_rebooting!(:start_amp_monitor)
       unless @amp_synth
-        @amp_synth = @server.trigger_synth :head, @recording_group, "sonic-pi-amp_stereo_monitor", {"bus" => 0}, true
+        @amp_synth = @server.trigger_synth :head, @monitor_group, "sonic-pi-amp_stereo_monitor", {"bus" => 0}, true
       end
     end
 
 
-    def trigger_synth(synth_name, group, args, info, now=false, t_minus_delta=false )
+    def trigger_synth(synth_name, group, args, info, now=false, t_minus_delta=false, pos=:tail )
       check_for_server_rebooting!(:trigger_synth)
-      @server.trigger_synth(:head, group, synth_name, args, info, now, t_minus_delta)
+
+      @server.trigger_synth(pos, group, synth_name, args, info, now, t_minus_delta)
     end
 
-    def volume=(vol)
+    def set_volume(vol, now=false, silent=false)
       check_for_server_rebooting!(:invert)
-      message "Setting main volume to #{vol}"
-      @server.node_ctl @mixer, {"amp" => vol}
+      @volume = vol
+      message "Setting master volume to #{vol}" unless silent
+      @server.node_ctl @mixer, {"pre_amp" => vol}, now
     end
 
     def mixer_invert_stereo(invert)
@@ -286,8 +328,23 @@ module SonicPi
       @server.control_delta = t
     end
 
-    def recording?(bus=0)
-      @recorders[bus]
+    def recording?
+      ! @recorders.empty?
+    end
+
+    def bit_depth=(depth)
+      @sample_format = case depth
+                       when 8
+                         "int8"
+                       when 16
+                         "int16"
+                       when 24
+                         "int24"
+                       when 32
+                         "int32"
+                       else
+                         raise "Unknown recording bit depth: #{depth}.\nExpected one of 8, 16, 24 or 32."
+                       end
     end
 
     def recording_start(path, bus=0)
@@ -295,11 +352,15 @@ module SonicPi
       return false if @recorders[bus]
       @recording_mutex.synchronize do
         return false if @recorders[bus]
-        bs = @server.buffer_stream_open(path)
-        s = @server.trigger_synth :head, @recording_group, "sonic-pi-recorder", {"out-buf" => bs.to_i, "in_bus" => bus.to_i}, true
+        bs = @server.buffer_stream_open(path, 65536, 2, "wav", @sample_format)
+        s = @server.trigger_synth :head, @monitor_group, "sonic-pi-recorder", {"out-buf" => bs.to_i, "in_bus" => bus.to_i}, true
         @recorders[bus] = [bs, s]
         true
       end
+    end
+
+    def save_buffer!(buf, path)
+      @server.buffer_write(buf, path, "wav", @sample_format)
     end
 
     def recording_stop(bus=0)
@@ -308,9 +369,21 @@ module SonicPi
       @recording_mutex.synchronize do
         return false unless @recorders[bus]
         bs, s = @recorders[bus]
-        bs.free
+        p = Promise.new
+        s.on_destroyed do
+          p.deliver! :completed
+        end
         s.kill
+
+        # Ensure we wait for the recording synth to have completed
+        # before continuing
+        p.get(5)
+        bs.free
         @recorders.delete bus
+
+        # ensure nodes are all paused if we are in a paused state
+        @server.node_pause(0, true) if @paused
+
         true
       end
     end
@@ -323,26 +396,45 @@ module SonicPi
       end
     end
 
-
     def reboot
-      @reboot_queue.push :reboot
-    end
-
-    private
-
-    def server_reboot
       # Important:
       # This method should only be called from the @server_rebooter
       # thread.
-      @rebooting = true
-      message "Rebooting server. Please wait..."
-      @server.shutdown
-      init_studio
-      reset_server
-      message "Server ready."
-      @rebooting = false
-      true
+      return nil if @rebooting
+      @reboot_mutex.synchronize do
+        @rebooting = true
+        message "Rebooting SuperCollider audio server. Please wait..."
+        @server.shutdown
+        init_studio
+        init_midi
+        reset_server
+        message "SuperCollider audio server ready."
+        @rebooting = false
+        true
+      end
     end
+
+    def pause(silent=false)
+      @recording_mutex.synchronize do
+        unless recording? || @paused
+          @server.node_pause(0, true)
+          message "Pausing SuperCollider audio server" unless silent
+        end
+        @paused = true
+      end
+    end
+
+    def start
+      @recording_mutex.synchronize do
+        if @paused
+          @server.node_run(0, true)
+          message "Resuming SuperCollider audio server"
+        end
+        @paused = false
+      end
+    end
+
+    private
 
     def check_for_server_rebooting!(msg=nil)
       if @rebooting
@@ -355,7 +447,7 @@ module SonicPi
     def message(s)
       m = s.to_s
       log "Studio - #{m}"
-      @msg_queue.push({:type => :info, :val => "Studio: #{m}"})
+      @msg_queue.push({:type => :info, :val => "Studio: #{m}"}) unless __system_thread_locals.get :sonic_pi_spider_silent
     end
 
 
@@ -365,12 +457,13 @@ module SonicPi
       @mixer_group = @server.create_group(:head, 0, "STUDIO-MIXER")
       @fx_group = @server.create_group(:before, @mixer_group, "STUDIO-FX")
       @synth_group = @server.create_group(:before, @fx_group, "STUDIO-SYNTHS")
-      @recording_group = @server.create_group(:after, @mixer_group, "STUDIO-RECORDING")
+      @monitor_group = @server.create_group(:after, @mixer_group, "STUDIO-MONITOR")
     end
 
     def reset_server
       reset_and_setup_groups_and_busses
       start_mixer
+      start_scope
     end
 
     def start_mixer
@@ -382,18 +475,26 @@ module SonicPi
       @mixer = @server.trigger_synth(:head, @mixer_group, mixer_synth, {"in_bus" => @mixer_bus.to_i}, nil, true)
     end
 
+    def start_scope
+      scope_synth = "sonic-pi-scope"
+      @scope = @server.trigger_synth(:head, @monitor_group, scope_synth, { "max_frames" => 1024 })
+    end
+
+
     def internal_load_sample(path, server=@server)
+      path = File.expand_path(path)
       return [@samples[path], true] if @samples[path]
       #message "Loading full sample path: #{path}"
-      buf_info = nil
+      sample_info = nil
       @sample_sem.synchronize do
         return @samples[path] if @samples[path]
-        raise "No sample exists with path:\n  #{unify_tilde_dir(path).inspect}" unless File.exists?(path) && !File.directory?(path)
-          buf_info = server.buffer_alloc_read(path)
-          buf_info.path = path
-        @samples[path] = buf_info
+        raise "No sample exists with path:\n  #{unify_tilde_dir(path).inspect}" unless File.exist?(path) && !File.directory?(path)
+        buf_info = server.buffer_alloc_read(path)
+        sample_info = SampleBuffer.new(buf_info, path)
+        @samples[path] = sample_info
       end
-      [buf_info, false]
+
+      [sample_info, false]
     end
 
     def internal_load_synthdefs(path, server=@server)

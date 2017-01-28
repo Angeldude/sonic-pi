@@ -140,12 +140,12 @@
                                 sustain_level 1
                                 env_curve 1
 
-                                input 0
+                                input 1
                                 out_bus 0]
      (let [decay_level (select:kr (= -1 decay_level) [decay_level sustain_level])
            amp         (varlag amp amp_slide amp_slide_curve amp_slide_shape)
            pan         (varlag pan pan_slide pan_slide_curve pan_slide_shape)
-           snd         (sound-in input)
+           snd         (sound-in (- input 1))
            env         (env-gen:kr (core/shaped-adsr attack decay sustain release attack_level decay_level sustain_level env_curve) :action FREE)]
        (out out_bus (pan2 (* env snd) pan amp))))
 
@@ -166,19 +166,42 @@
                                        sustain_level 1
                                        env_curve 1
 
-                                       input 0
+                                       input 1
                                        out_bus 0]
      (let [decay_level (select:kr (= -1 decay_level) [decay_level sustain_level])
            amp         (varlag amp amp_slide amp_slide_curve amp_slide_shape)
            pan         (varlag pan pan_slide pan_slide_curve pan_slide_shape)
-           snd-l       (sound-in input)
-           snd-r       (sound-in (+ input 1))
+           snd-l       (sound-in (- input 1))
+           snd-r       (sound-in input)
            env         (env-gen:kr (core/shaped-adsr attack decay sustain release attack_level decay_level sustain_level env_curve) :action FREE)
            snd-l       (* env snd-l)
            snd-r       (* env snd-r)
            snd         (balance2 snd-l snd-r pan amp)]
 
        (out out_bus (pan2 (* env snd) pan amp))))
+
+   (defsynth sonic-pi-scope [bus 0
+                             scope_num 0
+                             max_frames 4096]
+     (scope-out2 (in:ar bus 2) scope_num max_frames))
+
+   (defsynth sonic-pi-server-info
+    [response-id -1]
+    (send-reply (impulse 2)
+                "/sonic-pi/server-info"
+                [(sample-rate)
+                 (sample-dur)
+                 (radians-per-sample)
+                 (control-rate)
+                 (control-dur)
+                 (subsample-offset)
+                 (num-output-buses)
+                 (num-input-buses)
+                 (num-audio-buses)
+                 (num-control-buses)
+                 (num-buffers)
+                 (num-running-synths)]
+                response-id))
    )
 
 
@@ -187,4 +210,8 @@
     (core/save-synthdef sonic-pi-sound_in_stereo)
     (core/save-synthdef sonic-pi-mixer)
     (core/save-synthdef sonic-pi-basic_mixer)
-    (core/save-synthdef sonic-pi-recorder)))
+    (core/save-synthdef sonic-pi-recorder)
+    (core/save-synthdef sonic-pi-scope)
+    (core/save-synthdef sonic-pi-server-info))
+
+)

@@ -11,16 +11,15 @@
 # notice is included.
 #++
 require 'socket'
+require_relative "../util"
 
 module SonicPi
   module OSC
     class UDPServer
+      include Util
+
       def initialize(port, opts={}, &global_method)
         open = opts[:open]
-        use_decoder_cache = opts[:use_decoder_cache]
-        decoder_cache_size = opts[:decoder_cache_size] || 1000
-        use_encoder_cache = opts[:use_encoder_cache]
-        encoder_cache_size = opts[:encoder_cache_size] || 1000
         @port = port
         @opts = opts
         @socket = UDPSocket.new
@@ -31,8 +30,8 @@ module SonicPi
         end
         @matchers = {}
         @global_matcher = global_method
-        @decoder = OscDecode.new(use_decoder_cache, decoder_cache_size)
-        @encoder = OscEncode.new(use_encoder_cache, encoder_cache_size)
+        @decoder = FastOsc
+        @encoder = FastOsc
         @listener_thread = Thread.new {start_listener}
       end
 
@@ -85,6 +84,7 @@ module SonicPi
 
           begin
             address, args = @decoder.decode_single_message(osc_data)
+            log "OSC <-----        #{address} #{args.inspect}" if incoming_osc_debug_mode
             if @global_matcher
               @global_matcher.call(address, args)
             else

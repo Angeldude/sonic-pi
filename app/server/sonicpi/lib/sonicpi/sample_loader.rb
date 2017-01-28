@@ -13,7 +13,10 @@
 
 module SonicPi
   class SampleLoader
-    def initialize(samples_path)
+
+    include SonicPi::Util
+
+    def initialize(samples_paths)
       @cached_candidates = {}
       @cached_extracted_candidates = {}
       @cached_extracted_candidates_mutex = Mutex.new
@@ -22,12 +25,15 @@ module SonicPi
       @mutex = Mutex.new
       @folder_contents_mutex = Mutex.new
 
-      @samples_path = samples_path
+      @samples_paths = samples_paths
+      @samples_paths = [@samples_paths] unless @samples_paths.is_a?(Array) or @samples_paths.is_a?(SonicPi::Core::SPVector)
     end
 
     def find_candidates(filts_and_sources)
-      return [] if filts_and_sources.empty?
       filts_and_sources.flatten!
+      filts_and_sources.compact!
+
+      return [] if filts_and_sources.empty?
 
       res = @cached_candidates[filts_and_sources]
       return res if res
@@ -38,7 +44,7 @@ module SonicPi
       found_proc = false
 
       if orig_candidates.empty?
-        default_samples_paths.each do |p|
+        @samples_paths.each do |p|
           if p.end_with?("**")
             candidates.concat(ls_samples(p[0...-2], true))
           else
@@ -70,10 +76,10 @@ module SonicPi
         when NilClass
           # Do nothing
         when Proc
-          raise "Sample Pack Proc needs to accept either 0 or 1 arguments. Found #{block.arity}" unless f.arity == 1
+          raise "Sample Pack Proc needs to accept 1 argument only. Found #{block.arity}" unless f.arity == 1
           found_proc = true
           candidates = f.call(candidates)
-          raise "Sample Pack Filter Proc needs to return an array or ring. Got #{candidates.class}: #{candidates.inspect}" unless candidates.is_a?(Array) || candidates.is_a?(SonicPi::Core::RingVector)
+          candidates = [candidates] unless is_list_like?(candidates)
         else
           raise "Unknown sample filter type: #{f.class} - got: #{f.inspect}"
         end
@@ -110,7 +116,7 @@ module SonicPi
             all_candidates.concat(ls_samples(expanded[0...-2], true))
           elsif File.directory?(expanded)
             all_candidates.concat(ls_samples(expanded))
-          elsif File.exists?(expanded)
+          elsif File.exist?(expanded)
             all_candidates << expanded
           else
             raise "Unknown sample candidate kind: #{expanded.inspect}. Not a file, directory or /** glob."
@@ -132,7 +138,7 @@ module SonicPi
 
         p = File.expand_path(el)
 
-        if @cached_folder_contents[p] || File.exists?(p) || (p.end_with?("**") && File.directory?(p[0...-2]))
+        if @cached_folder_contents[p] || File.exist?(p) || (p.end_with?("**") && File.directory?(p[0...-2]))
           idx += 1
           candidates << p
         else
@@ -172,13 +178,5 @@ module SonicPi
         end
       end
     end
-
-    private
-
-    def default_samples_paths
-      path = Thread.current.thread_variable_get(:sonic_pi_mod_sound_sample_path) || @samples_path
-      path = [path] unless path.is_a?(Array) or path.is_a?(SonicPi::Core::SPVector)
-    end
-
   end
 end

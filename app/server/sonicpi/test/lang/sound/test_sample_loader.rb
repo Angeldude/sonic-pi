@@ -36,8 +36,7 @@ module SonicPi
       # -  subdir
       #    |
       #    - quux.wav
-      @loader = SampleLoader.new(@fake_sample_dir)
-      @loader.stubs(:default_samples_paths).returns([@fake_built_in_sample_dir])
+      @loader = SampleLoader.new(@fake_built_in_sample_dir)
     end
 
     def test_ls_candidates
@@ -112,6 +111,11 @@ module SonicPi
       candidates, filts = @loader.split_candidates_and_filts(filts_and_sources)
       assert_equal([@fake_sample_dir + "/**"], candidates)
       assert_equal([], filts)
+    end
+
+    def test_nil
+      res = @loader.find_candidates([nil])
+      assert_equal([], res)
     end
 
     def test_single_builtin_symbol

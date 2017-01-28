@@ -35,7 +35,7 @@ void OscHandler::oscMessage(std::vector<char> buffer){
 
     oscpkt::Message *msg;
     while (pr.isOk() && (msg = pr.popMessage()) != 0) {
-      if (msg->match("/multi_message")){
+      if (msg->match("/log/multi_message")){
         int msg_count;
         SonicPiLog::MultiMessage mm;
         mm.theme = theme;
@@ -56,7 +56,7 @@ void OscHandler::oscMessage(std::vector<char> buffer){
         QMetaObject::invokeMethod( out, "handleMultiMessage", Qt::QueuedConnection,
                                    Q_ARG(SonicPiLog::MultiMessage, mm ) );
       }
-      else if (msg->match("/info")) {
+      else if (msg->match("/log/info")) {
         std::string s;
         int style;
         if (msg->arg().popInt32(style).popStr(s).isOkNoMoreArgs()) {
@@ -130,7 +130,7 @@ void OscHandler::oscMessage(std::vector<char> buffer){
           std::cout << "[GUI] - unhandled OSC msg /error: "<< std::endl;
         }
       }
-      else if (msg->match("/replace-buffer")) {
+      else if (msg->match("/buffer/replace")) {
         std::string id;
         std::string content;
         int line;
@@ -144,6 +144,19 @@ void OscHandler::oscMessage(std::vector<char> buffer){
           std::cout << "[GUI] - error: unhandled OSC msg /replace-buffer: "<< std::endl;
         }
       }
+      else if (msg->match("/buffer/replace-idx")) {
+        int buf_idx;
+        std::string content;
+        int line;
+        int index;
+        int line_number;
+        if (msg->arg().popInt32(buf_idx).popStr(content).popInt32(line).popInt32(index).popInt32(line_number).isOkNoMoreArgs()) {
+
+          QMetaObject::invokeMethod( window, "replaceBufferIdx", Qt::QueuedConnection, Q_ARG(int, buf_idx), Q_ARG(QString, QString::fromStdString(content)), Q_ARG(int, line), Q_ARG(int, index), Q_ARG(int, line_number));
+        } else {
+          std::cout << "[GUI] - error: unhandled OSC msg /replace-buffer: "<< std::endl;
+        }
+      }
       else if (msg->match("/update-info-text")) {
         std::string content;
         if (msg->arg().popStr(content).isOkNoMoreArgs()) {
@@ -152,7 +165,7 @@ void OscHandler::oscMessage(std::vector<char> buffer){
           std::cout << "[GUI] - error: unhandled OSC msg /update_info_text: "<< std::endl;
         }
       }
-      else if (msg->match("/replace-lines")) {
+      else if (msg->match("/buffer/replace-lines")) {
         std::string id;
         std::string content;
         int start_line;
@@ -164,6 +177,14 @@ void OscHandler::oscMessage(std::vector<char> buffer){
           QMetaObject::invokeMethod( window, "replaceLines", Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(id)), Q_ARG(QString, QString::fromStdString(content)), Q_ARG(int, start_line),Q_ARG(int, finish_line), Q_ARG(int, point_line), Q_ARG(int, point_index));
         } else {
           std::cout << "[GUI] - error: unhandled OSC msg /replace-lines: "<< std::endl;
+        }
+      }
+      else if (msg->match("/buffer/run-idx")) {
+        int buf_idx;
+        if (msg->arg().popInt32(buf_idx).isOkNoMoreArgs()) {
+          QMetaObject::invokeMethod( window, "runBufferIdx", Qt::QueuedConnection, Q_ARG(int, buf_idx));
+        } else {
+         std::cout << "[GUI] - error: unhandled OSC msg /buffer/run-idx: "<< std::endl;
         }
       }
       else if (msg->match("/exited")) {
@@ -207,6 +228,12 @@ void OscHandler::oscMessage(std::vector<char> buffer){
           QMetaObject::invokeMethod( window, "updateVersionNumber", Qt::QueuedConnection, Q_ARG(QString, QString::fromStdString(version)), Q_ARG(int, version_num), Q_ARG(QString, QString::fromStdString(latest_version)), Q_ARG(int, latest_version_num),Q_ARG(QDate, date), Q_ARG(QString, QString::fromStdString(platform)));
         } else
           std::cout << "[GUI] - error: unhandled OSC msg /version " << std::endl;
+      }
+      else if (msg->match("/runs/all-completed")) {
+        if (msg->arg().isOkNoMoreArgs()) {
+          QMetaObject::invokeMethod( window, "allJobsCompleted", Qt::QueuedConnection);
+        } else
+          std::cout << "[GUI] - error: unhandled OSC msg /runs/all-completed " << std::endl;
       }
       else {
         std::cout << "[GUI] - error: unhandled OSC message" << std::endl;

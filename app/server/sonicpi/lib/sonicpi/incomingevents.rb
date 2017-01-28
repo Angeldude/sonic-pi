@@ -24,7 +24,7 @@ module SonicPi
       @handlers = {}
       @continue = true
       @handler_thread = Thread.new do
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, name)
+        __system_thread_locals.set_local(:sonic_pi_local_thread_group, name)
         Thread.current.priority = priority
         while @continue do
           consume_event
@@ -39,7 +39,7 @@ module SonicPi
     def event(handle, payload)
       prom = Promise.new
       @event_queue << [:event, [handle, payload, prom]]
-      prom.get
+      prom.get(5)
     end
 
     def async_event(handle, payload)
@@ -49,7 +49,7 @@ module SonicPi
     def add_handler(handle, key, &block)
       prom = Promise.new
       @event_queue << [:add, [handle, key, block, prom]]
-      prom.get
+      prom.get(5)
     end
 
     def async_add_handlers(*args)
@@ -75,6 +75,8 @@ module SonicPi
     end
 
     def async_multi_oneshot_handler(handles, &block)
+      return async_oneshot_handler(handles[0], &block) if handles.size == 1
+
       key_prefix = gensym("sonicpi/incomingevents/oneshot")
 
       handles_keys = handles.map {|h| [h, "#{key_prefix}-#{h}"]}

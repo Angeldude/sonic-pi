@@ -23,17 +23,10 @@ SonicPiLexer::SonicPiLexer(SonicPiTheme *theme) : QsciLexerRuby() {
     this->setDefaultPaper(theme->color("Background"));
 }
 
-#if defined(Q_OS_WIN)
-static char default_font[] = "Courier New";
-#elif defined(Q_OS_MAC)
-static char default_font[] = "Menlo";
-#else
-static char default_font[] = "Bitstream Vera Sans Mono";
-#endif
-
+static char default_font[] = "Hack";
 
 // triggers autocompletion for the next word
-QStringList QsciLexer::autoCompletionWordSeparators() const {
+QStringList SonicPiLexer::autoCompletionWordSeparators() const {
   QStringList seps;
   seps << " " << "," << "(" << ")" << "{" << "}";
   return seps;

@@ -13,6 +13,9 @@
 
 #include <Qsci/qsciscintilla.h>
 #include "sonicpitheme.h"
+#include "oscsender.h"
+#include "sonicpilog.h"
+#include <QCheckBox>
 
 class SonicPiLexer;
 class QSettings;
@@ -22,11 +25,14 @@ class SonicPiScintilla : public QsciScintilla
   Q_OBJECT
 
  public:
-  SonicPiScintilla(SonicPiLexer *lexer, SonicPiTheme *theme);
+  SonicPiScintilla(SonicPiLexer *lexer, SonicPiTheme *theme, QString fileName, OscSender *oscSender, QCheckBox *autoIndent);
 
   virtual QStringList apiContext(int pos, int &context_start,
 				 int &last_word_start);
   SonicPiTheme *theme;
+  QString fileName;
+  OscSender *oscSender;
+
   void redraw();
 
   public slots:
@@ -59,8 +65,16 @@ class SonicPiScintilla : public QsciScintilla
     void zoomFontOut();
     void newLine();
     void replaceBuffer(QString content, int line, int index, int first_line);
+    void newlineAndIndent();
+    void completeListOrNewlineAndIndent();
 
  private:
     void addKeyBinding(QSettings &qs, int cmd, int key);
     void addOtherKeyBinding(QSettings &qs, int cmd, int key);
+    void dragEnterEvent(QDragEnterEvent *pEvent);
+    void dropEvent(QDropEvent *pEvent);
+    void dragMoveEvent(QDragMoveEvent *event);
+    bool event(QEvent *evt);
+    QCheckBox *autoIndent;
+
 };

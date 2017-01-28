@@ -14,6 +14,8 @@
 require_relative 'support/docsystem'
 require_relative "../version"
 require_relative "../util"
+require_relative "../runtime"
+
 require 'active_support/inflector'
 
 ## TODO: create _* equivalents of all fns - for silent (i.e computation) versions
@@ -28,6 +30,575 @@ module SonicPi
       class AssertionError < StandardError ; end
 
       THREAD_RAND_SEED_MAX = 10e20
+
+      def run_file(path)
+        path = File.expand_path(path.to_s)
+        raise "Unable to run file - no file found with path: #{path}" unless File.exist?(path)
+        __spider_eval(File.read(path))
+      end
+      doc name:           :run_file,
+          introduced:     Version.new(2,11,0),
+          summary:        "Evaluate the contents of the file as a new Run",
+          args:           [[:filename, :path]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Reads the full contents of the file with `path` and executes it in a new Run. This works as if the code in the file was in a buffer and Run button was pressed.",
+          examples: ["
+run_file \"~/path/to/sonic-pi-code.rb\" #=> will run the contents of this file"]
+
+      def run_code(code)
+        __spider_eval(code.to_s)
+      end
+      doc name:           :run_code,
+          introduced:     Version.new(2,11,0),
+          summary:        "Evaluate the code passed as a String as a new Run",
+          args:           [[:code, :string]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Executes the code passed as a string in a new Run. This works as if the code was in a buffer and Run button was pressed.",
+          examples: ["
+run_code \"sample :ambi_lunar_land\" #=> will play the :ambi_lunar_land sample",
+
+        "# Works with any amount of code:
+run_code \"8.times do\nplay 60\nsleep 1\nend # will play 60 8 times"]
+
+
+      def use_osc(host, port=57120)
+
+        # 57120 is the OSC spec default port
+
+        host_and_port = (host.include? ":") ? host : (host + ":" + port.to_s)
+
+        __thread_locals.set :sonic_pi_osc_client, host_and_port.freeze
+      end
+      doc name:           :use_osc,
+          hide:           true,
+          introduced:     Version.new(2,12,0),
+          summary:        "Configures where OSC messages are sent",
+          args:           [[:host, :port]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Sets the destination host and port that `osc` will send messages to.
+
+OSC is a way of passing messages over the network between two programs or
+computers. Computers can be identified by a specific internet address, known as
+an IP address, and specific programs can be reached by specifying a port.
+Here's an example using a hypothetical computer:
+
+`use_osc \"192.168.1.111\", 8000`
+
+If you're sending messages to programs on your own computer, you can use a
+special address called \"localhost\".
+
+`use_osc \"localhost\", 4556`
+
+Once configured, you can use `osc` to send messages.
+
+Go have fun connecting existing programs, even your own programs, to Sonic Pi
+using OSC! The possibilities are endless.
+
+---
+
+A note to Web Wizards out there: Sonic Pi has its own, undocumented OSC
+interface. You can run code in your current Sonic Pi session by sending OSC
+messages to localhost:4557. You can also trigger cues by sending messages to
+localhost:4559. Cooler yet, you can trigger cues on other people's Sonic Pi
+sessions using OSC. This is great for livecoding in groups!
+
+I highly encourage you to grab some existing OSC libraries in your language of
+choice to wire up whatever software/hardware combo you want to Sonic Pi. If
+you are experiencing delays between the OSC message and the played sound, try
+reducing the schedule-ahead time with `set_sched_ahead_time! 0`.
+
+See the examples for implementation specifics:
+",
+         examples: ["# Run Sonic Pi code with OSC
+
+use_osc \"localhost\", 4557
+osc \"/run-code\" 1 \"play 70\"
+",
+
+"# Trigger Sonic Pi cues with OSC
+
+use_osc \"localhost\", 4559
+
+live_loop :send do
+  osc \"/waitforit\"
+  sleep 1
+end
+
+live_loop :drums do
+  sync :waitforit
+  sample :bd_haus
+end
+", "# Trigger Sonic Pi cues with OSC, including parameter passing
+
+use_osc \"localhost\", 4559
+
+live_loop :send do
+  osc \"passalong\", \"param1\", 80, \"param2\", 90
+  sleep 1
+end
+
+live_loop :print do
+  s = sync :passalong
+  puts s[:param1], s[:param2]
+end"
+]
+
+      def with_osc(host, port=57120, &block)
+        raise "with_osc must be called with a do/end block. Perhaps you meant use_osc" unless block
+        current_host_and_port = __thread_locals.get(:sonic_pi_osc_client)
+        use_osc(host, port)
+        res = block.call
+        __thread_locals.set(:sonic_pi_osc_client, current_host_and_port)
+        res
+      end
+
+      def osc_send(host, port, path, *args)
+        t = __system_thread_locals.get(:sonic_pi_spider_time) + __current_sched_ahead_time
+        @osc_server.send_ts(t, "localhost", @osc_router_port, "/send_after", host, port, path, *args)
+        #__delayed_message "OSC -> #{host}, #{port}, #{path}, #{args}"
+      end
+
+      def osc_send_now(host, port, path, *args)
+        @osc_server.send(host, port, path, *args)
+        __delayed_message "OSC -> #{host}, #{port}, #{path}, #{args}"
+      end
+
+      def osc(path, *args)
+        host_and_port = __thread_locals.get :sonic_pi_osc_client
+        raise "Please specify a destination with use_osc or with_osc" unless host_and_port
+        host, port = host_and_port.split ":"
+        port = port.to_i
+        osc_send host, port, path, *args
+      end
+      doc name:           :osc,
+          hide:           true,
+          introduced:     Version.new(2,12,0),
+          summary:        "Send an OSC message",
+          args:           [[:path, :arguments]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Sends a message using OSC (Open Sound Control) to the current host and port specified by `use_osc` or `with_osc`.
+
+OSC is a way of passing messages over the network between two programs or
+computers. A typical OSC message has two parts: a descriptive `path` which looks
+like a URL of sorts, and an optional list of `arguments` that are usually
+strings or numbers. How each `path` and `arguments` is handled depends on the
+receiving end.
+
+For example, a hypothetical synthesizer program might accept this OSC message:
+
+`/set/filter \"lowpass\" 80 0.5`
+
+where `/set/filter` is the path, and `\"lowpass\"`, `80`, and `0.5` are three
+arguments. This could be sent by Sonic Pi by writing:
+
+`osc \"/set/filter\", \"lowpass\", 80, 0.5`
+
+Go have fun connecting existing programs, even your own programs, to Sonic Pi
+using OSC! The possibilities are endless.
+
+---
+
+A note to Web Wizards out there: Sonic Pi has its own, undocumented OSC
+interface. You can run code in your current Sonic Pi session by sending OSC
+messages to localhost:4557. You can also trigger cues by sending messages to
+localhost:4559. Cooler yet, you can trigger cues on other people's Sonic Pi
+sessions using OSC. This is great for livecoding in groups!
+
+I highly encourage you to grab some existing OSC libraries in your language of
+choice to wire up whatever software/hardware combo you want to Sonic Pi. If
+you are experiencing delays between the OSC message and the played sound, try
+reducing the schedule-ahead time with `set_sched_ahead_time! 0`.
+
+See the examples for implementation specifics:
+",
+         examples: ["# Run Sonic Pi code with OSC
+
+use_osc \"localhost\", 4557
+osc \"/run-code\" 1 \"play 70\"
+",
+
+"# Trigger Sonic Pi cues with OSC
+
+use_osc \"localhost\", 4559
+
+live_loop :send do
+  osc \"/waitforit\"
+  sleep 1
+end
+
+live_loop :drums do
+  sync :waitforit
+  sample :bd_haus
+end
+", "# Trigger Sonic Pi cues with OSC, including parameter passing
+
+use_osc \"localhost\", 4559
+
+live_loop :send do
+  osc \"passalong\", \"param1\", 80, \"param2\", 90
+  sleep 1
+end
+
+live_loop :print do
+  s = sync :passalong
+  puts s[:param1], s[:param2]
+end"
+]
+
+      def reset
+        __thread_locals.reset!
+      end
+      doc name:           :reset,
+          introduced:     Version.new(2,11,0),
+          summary:        "Reset all thread locals",
+          args:           [[]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "All settings such as the current synth, BPM, random stream and tick values will be reset to the values inherited from the parent thread. Consider using `clear` to reset all these values to their defaults.",
+         examples: ["
+# Basic Reset
+use_synth :blade
+use_octave 3
+
+puts \"before\"         #=> \"before\"
+puts current_synth      #=> :blade
+puts current_octave     #=> 3
+puts rand               #=> 0.75006103515625
+puts tick               #=> 0
+
+reset
+
+puts \"after\"          #=> \"after\"
+puts current_synth      #=> :beep
+puts current_octave     #=> 0
+puts rand               #=> 0.75006103515625
+puts tick               #=> 0",
+
+"Reset remembers defaults from when the thread was created:
+use_synth :blade
+use_octave 3
+
+puts \"before\"         #=> \"before\"
+puts current_synth      #=> :blade
+puts current_octave     #=> 3
+puts rand               #=> 0.75006103515625
+puts tick               #=> 0
+
+at do
+  use_synth :tb303
+  puts rand               #=> 0.9287109375
+  reset
+  puts \"thread\"          #=> \"thread\"
+
+
+                          # The call to reset ensured that the current
+                          # synth was returned to the the state at the
+                          # time this thread was started. Thus any calls
+                          # to use_synth between this line and the start
+                          # of the thread are ignored
+  puts current_synth      #=> :blade
+  puts current_octave     #=> 3
+
+                          # The call to reset ensured
+                          # that the random stream was reset
+                          # to the same state as it was when
+                          # the current thread was started
+  puts rand               #=> 0.9287109375
+  puts tick               #=> 0
+end"]
+
+      def clear
+        __thread_locals.clear!
+        __set_default_user_thread_locals!
+      end
+      doc name:           :clear,
+          introduced:     Version.new(2,11,0),
+          summary:        "Clear all thread locals to defaults",
+          args:           [[]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  false,
+      doc:            "All settings such as the current synth, BPM, random stream and tick values will be reset to their defaults. Consider using `reset` to reset all these values to those inherited from the parent thread.",
+      examples: [
+"Clear wipes out the threads locals
+use_synth :blade
+use_octave 3
+
+puts \"before\"         #=> \"before\"
+puts current_synth      #=> :blade
+puts current_octave     #=> 3
+puts rand               #=> 0.75006103515625
+puts tick               #=> 0
+
+at do
+  use_synth :tb303
+  puts rand               #=> 0.9287109375
+  clear
+  puts \"thread\"         #=> \"thread\"
+
+
+                          # The clear reset the current synth to the default
+                          # of :beep. We are therefore ignoring any inherited
+                          # synth settings. It is as if the thread was a completely
+                          # new Run.
+  puts current_synth      #=> :beep
+
+                          # The current octave defaults back to 0
+  puts current_octave     #=> 0
+
+                          # The random stream defaults back to the standard
+                          # stream used by every new Run.
+  puts rand               #=> 0.75006103515625
+  puts tick               #=> 0
+end"
+]
+
+      def time_warp(times=0, params=nil, &block)
+        __schedule_delayed_blocks_and_messages!
+        raise "time_warp requires a do/end block" unless block
+
+        had_params = params
+        times = [times] if times.is_a? Numeric
+
+        # When no params are specified, pass the times through as params
+        params ||= times
+        params_size = params.size
+
+        raise "params needs to be a list-like thing" unless params.respond_to? :[]
+        raise "times needs to be a list-like thing" unless times.respond_to? :each_with_index
+        prev_tw_val = __system_thread_locals.get :sonic_pi_spider_in_time_warp
+
+
+        vt_orig = __system_thread_locals.get :sonic_pi_spider_time
+        density = __thread_locals.get(:sonic_pi_local_spider_density) || 1.0
+        orig_sleep_mul_w_density = __thread_locals.get(:sonic_pi_spider_sleep_mul) * density
+        orig_beat = __system_thread_locals.get(:sonic_pi_spider_beat)
+        sat = __current_sched_ahead_time
+
+        __system_thread_locals.set_local :sonic_pi_spider_in_time_warp, true
+
+        times.each_with_index do |delta, idx|
+          sleep_time = delta * orig_sleep_mul_w_density
+          new_time = vt_orig + sleep_time
+
+          raise "Time travel error - a jump back of #{delta} is too far.\nSorry, although it would be amazing, you can't go back in time beyond the sched_ahead time of #{sat}" if (Time.now - sat) > new_time
+
+          __system_thread_locals.set :sonic_pi_spider_time, new_time.freeze
+          __system_thread_locals.set :sonic_pi_spider_beat, orig_beat + delta
+
+          case block.arity
+            when 0
+              block.call
+            when 1
+              block.call(params[idx % params_size])
+            when 2
+              if had_params
+                block.call(t, params[idx % params_size])
+              else
+                block.call(t, idx)
+              end
+            when 3
+              block.call(t, params[idx % params_size], idx)
+            else
+              raise "block for time_warp should only accept 0, 1, 2 or 3 parameters. You gave: #{block.arity}."
+            end
+          __schedule_delayed_blocks_and_messages!
+        end
+
+        __system_thread_locals.set :sonic_pi_spider_time, vt_orig
+        __system_thread_locals.set :sonic_pi_spider_beat, orig_beat
+        __system_thread_locals.set_local :sonic_pi_spider_in_time_warp, prev_tw_val
+      end
+      doc name:           :time_warp,
+          introduced:     Version.new(2,11,0),
+          summary:        "Shift time forwards or backwards for the given block",
+          args:           [[:delta_time, :number]],
+          returns:        nil,
+          opts:           nil,
+          accepts_block:  true,
+          doc:            "The code within the given block is executed with the specified delta time shift specified in beats. For example, if the delta value is 0.1 then all code within the block is executed with a 0.1 beat delay. Negative values are allowed which means you can move a block of code *backwards in time*. For example a delta value of -0.1 will execute the code in the block 0.1 beats ahead of time. The time before the block started is restored after the execution of the block.
+
+Given a list of times, run the block once after waiting each given time. If passed an optional params list, will pass each param individually to each block call. If size of params list is smaller than the times list, the param values will act as rings (rotate through). If the block is given 1 arg, the times are fed through. If the block is given 2 args, both the times and the params are fed through. A third block arg will receive the index of the time.
+
+Note that the code within the block is executed synchronously with the code before and after, so all thread locals will be modified inline - as is the case for `with_fx`. However, as time is always restored to the value before `time_warp` started, you can use it to schedule events for the future in a similar fashion to a thread (via `at` or `in_thread`) without having to use an entirely fresh and distinct set of thread locals - see examples.
+
+Also, note that you cannot travel backwards in time beyond the `current_sched_ahead_time`.
+
+If the `time_warp` block is within a `density` block, the delta time is not affected (although all the other times such as sleep and phase durations will be affected) - see example.
+
+`time_warp` is ahead-of-time scheduling within the current thread. See `at` for just-in-time scheduling using multiple isolated threads.",
+          examples:       ["# shift forwards in time
+play 70            #=> plays at time 0
+sleep 1
+play 75            #=> plays at time 1
+
+time_warp 0.1 do
+                   # time shifts forward by 0.1 beats
+  play 80          #=> plays at 1.1
+  sleep 0.5
+  play 80          #=> plays at 1.6
+                   # time shifts back by 0.1 beats
+                   # however, the sleep 0.5 is still accounted for
+end
+                   # we now honour the original sleep 1 and the
+                   # sleep 0.5 within the time_warp block, but
+                   # any time shift delta has been removed
+play 70            #=> plays at 1.5",
+
+        "# shift backwards in time
+
+play 70            #=> plays at time 0
+sleep 1
+play 75            #=> plays at time 1
+
+time_warp -0.1 do
+                   # time shifts backwards by 0.1 beats
+  play 80          #=> plays at 0.9
+  sleep 0.5
+  play 80          #=> plays at 1.4
+                   # time shifts forward by 0.1 beats
+                   # however, the sleep 0.5 is still accounted for
+end
+                   # we now honour the original sleep 1 and the
+                   # sleep 0.5 within the time_warp block, but
+                   # any time shift delta has been removed
+play 70            #=> plays at 1.5",
+
+        "# Ticks count linearly through time_warp
+
+puts tick          #=> prints 0 (at time 0)
+
+sleep 1
+
+time_warp 2 do
+  puts tick        #=> prints 1 (at time 3)
+end
+
+sleep 0.5
+
+puts tick          #=> prints 2 (at time 1.5)",
+
+                "# Comparing time_warp with at
+
+puts tick          #=> prints 0 (at time 0)
+sleep 0.5
+puts tick          #=> prints 1 (at time 0.5)
+
+time_warp 2 do
+  puts tick        #=> prints 2 (at time 2.5)
+  sleep 0.5
+  puts tick        #=> prints 3 (at time 3)
+end
+
+at 3 do            # the at will reset all thread locals
+  puts tick        #=> prints 0 (At time 3.5)
+  sleep 0.5
+  puts tick        #=> prints 1 (At time 4)
+end
+
+sleep 0.5
+
+puts tick          #=> prints 4 (at time 1)",
+
+        "# Time Warp within Density
+density 2 do                        # Typically this will double the BPM and affect all times
+                                    # in addition to looping the internal block twice
+  time_warp 0.5 do                  # However, this time is *not* affected and will remain 0.5
+    with_fx :slicer, phase: 0.5 do  # This phase duration *is* affected and will be 0.25
+      play 60
+      sleep 1                       # This time *will* be affected by the density and be 0.5
+    end
+  end
+
+end
+
+",
+
+        " # Time Warp with lists of times
+
+time_warp [0, 1, 2, 3] do
+  puts \"hello\"                # Will print \"hello\" at 0, 1, 2, and 3 seconds
+end
+                                # Notice that the run completes before all the
+                                # messages have been delivered. This is because it
+                                # schedules all the messages at once so the program
+                                # can complete immediately. This is unlike at which
+                                # would appear to behave similarly, but would wait
+                                # for all messages to be delivered (on time) before
+                                # allowing the program to complete. ",
+
+"time_warp [1, 2, 4] do  # plays a note after waiting 1 beat,
+    play 75                # then after 1 more beat,
+  end                      # then after 2 more beats (4 beats total)
+  ",
+  "
+  time_warp [1, 2, 3], [75, 76, 77] do |n|  # plays 3 different notes
+    play n
+  end
+  ",
+  "
+  time_warp [1, 2, 3],
+      [{:amp=>0.5}, {:amp=> 0.8}] do |p| # alternate soft and loud
+    sample :drum_cymbal_open, p          # cymbal hits three times
+  end
+  ",
+  "
+  time_warp [0, 1, 2] do |t| # when no params are given to at, the times are fed through to the block
+    puts t #=> prints 0, 1, then 2
+  end
+  ",
+  "
+  time_warp [0, 1, 2], [:a, :b] do |t, b|  # If you specify the block with 2 args, it will pass through both the time and the param
+    puts [t, b] #=> prints out [0, :a], [1, :b], then [2, :a]
+  end
+  ",
+  "
+  time_warp [0, 0.5, 2] do |t, idx|  # If you specify the block with 2 args, and no param list to at, it will pass through both the time and the index
+    puts [t, idx] #=> prints out [0, 0], [0.5, 1], then [2, 2]
+  end
+  ",
+  "
+  time_warp [0, 0.5, 2], [:a, :b] do |t, b, idx|  # If you specify the block with 3 args, it will pass through the time, the param and the index
+    puts [t, b, idx] #=> prints out [0, :a, 0], [0.5, :b, 1], then [2, :a, 2]
+  end
+  ",
+  " # time_warp consumes & interferes with the outer random stream
+puts \"main: \", rand  # 0.75006103515625
+rand_back
+time_warp 1 do         # the random stream inside the at block is the
+                       # same as the one in the outer block
+  puts \"time_warp:\", rand # 0.75006103515625
+  puts \"time_warp:\", rand # 0.733917236328125
+  rand_back           # undo last call to rand
+end
+
+sleep 2
+puts \"main: \", rand # value is now 0.733917236328125 again
+",
+
+"
+            # Each block run inherits the same thread locals from the previous one.
+            # This means things like the thread local counters can flow through
+            # time warp iterations:
+time_warp [0, 2] do
+            # first time round (after 1 beat) prints:
+  puts tick # 0
+  puts tick # 1
+end
+            # second time round (after 2 beats) prints:
+            # 2
+            # 3
+" ]
+
 
       def tick_set(*args)
         SonicPi::Core::ThreadLocalCounter.set(*args)
@@ -97,8 +668,7 @@ module SonicPi
       doc name:           :tick_reset_all,
           introduced:     Version.new(2,6,0),
           summary:        "Reset all ticks",
-          args:           [[:value, :number]],
-          alt_args:       [[[:key, :symbol], [:value, :number]]],
+          args:           [],
           returns:        :nil,
           opts:           nil,
           accepts_block:  false,
@@ -212,6 +782,7 @@ module SonicPi
 
 
       def look(*args)
+        return args[1] if args[1].is_a?(Numeric) && args.size == 1
         SonicPi::Core::ThreadLocalCounter.look(*args)
       end
       doc name:           :look,
@@ -256,7 +827,13 @@ module SonicPi
     play (ring :e1, :e2, :e3).look, release: 0.25 # use the same look on another ring
     sleep 0.25
   end
-  "
+  ",
+"
+# Returns numbers unchanged if single argument
+puts look(0)     #=> 0
+puts look(4)     #=> 4
+puts look(-4)    #=> -4
+puts look(20.3)  #=> 20.3"
       ]
 
 
@@ -544,7 +1121,7 @@ end"
 
 
       def range(start, finish, *args)
-        if args.is_a?(Array) && args.size == 1 && args.first.is_a?(Numeric)
+        if is_list_like?(args) && args.size == 1 && args.first.is_a?(Numeric)
           # Allow one optional arg for legacy reasons. Versions earlier
           # than v2.5 allowed: range(1, 10, 2)
           step_size = args.first
@@ -561,29 +1138,30 @@ end"
         cur = start
         if inclusive
           if start < finish
-            while cur <= finish
-              res << cur
+            while cur.round(14) <= finish
+              res << cur.round(14)
               cur += step_size
             end
           else
-            while cur >= finish
-              res << cur
+            while cur.round(14) >= finish
+              res << cur.round(14)
               cur -= step_size
             end
           end
 
         else
           if start < finish
-            while cur < finish
-              res << cur
+            while cur.round(14) < finish
+              res << cur.round(14)
               cur += step_size
             end
           else
-            while cur > finish
-              res << cur
+            while cur.round(14) > finish
+              res << cur.round(14)
               cur -= step_size
             end
-          end      end
+          end
+        end
         res.ring
       end
       doc name:           :range,
@@ -594,6 +1172,7 @@ end"
           opts:           {:step      => "Size of increment between steps; step size.",
                            :inclusive => "If set to true, range is inclusive of finish value"},
           accepts_block:  false,
+          memoize: true,
           doc:            "Create a new ring buffer from the range arguments (start, finish and step size). Step size defaults to `1`. Indexes wrap around positively and negatively",
           examples:       [
         "(range 1, 5)    #=> (ring 1, 2, 3, 4)",
@@ -630,6 +1209,7 @@ end"
           opts:           {:steps     => "number of slices or segments along the line",
                            :inclusive => "boolean value representing whether or not to include finish value in line"},
           accepts_block:  false,
+          memoize: true,
           doc:            "Create a ring buffer representing a straight line between start and finish of num_slices elements. Num slices defaults to `8`. Indexes wrap around positively and negatively. Similar to `range`.",
           examples:       [
         "(line 0, 4, steps: 4)    #=> (ring 0.0, 1.0, 2.0, 3.0)",
@@ -659,6 +1239,7 @@ end"
           returns:        :ring,
           opts:           nil,
           accepts_block:  false,
+          memoize: true,
           doc:            "Create a ring containing the results of successive halving of the `start` value. If `num_halves` is negative, will return a ring of `doubles`.",
           examples:       [
         "(halves 60, 2)  #=> (ring 60, 30)",
@@ -689,6 +1270,7 @@ end"
           returns:        :ring,
           opts:           nil,
           accepts_block:  false,
+          memoize: true,
           doc:            "Create a ring containing the results of successive doubling of the `start` value. If `num_doubles` is negative, will return a ring of `halves`.",
           examples:       [
         "(doubles 60, 2)  #=> (ring 60, 120)",
@@ -744,6 +1326,26 @@ end"
 
 
 
+      def map(*args)
+        SonicPi::Core::SPMap.new(*args)
+      end
+      doc name:           :map,
+          introduced:     Version.new(2,11,0),
+          summary:        "Create an immutable map",
+          args:           [[:list, :array]],
+          returns:        :map,
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Create a new immutable key/value map from args. ",
+          examples:       [
+        "(map foo: 1, bar: 2)[:foo] #=> 1",
+        "(map foo: 1, bar: 2)[:bar] #=> 2",
+        "(map foo: 1, bar: 2)[:quux] #=> nil",
+      ]
+
+
+
+
 
       def ramp(*args)
         SonicPi::Core::RampVector.new(args)
@@ -769,8 +1371,12 @@ end"
 
 
 
-      def choose(args)
-        args.to_a.choose
+      def choose(args=nil)
+        if args
+          args.to_a.choose
+        else
+          return lambda{|col| col.choose}
+        end
       end
       doc name:           :choose,
           introduced:     Version.new(2,0,0),
@@ -778,19 +1384,51 @@ end"
           args:           [[:list, :array]],
           opts:           nil,
           accepts_block:  false,
-          doc:            "Choose an element at random from a list (array).",
+          doc:            "Choose an element at random from a list (array).
+
+If no arguments are given, will return a lambda function which when called takes an argument which will be a list to be chosen from. This is useful for choosing random `onset:` vals for samples
+
+Always returns a single element (or nil)" ,
          examples:       ["
   loop do
     play choose([60, 64, 67]) #=> plays one of 60, 64 or 67 at random
     sleep 1
     play chord(:c, :major).choose #=> You can also call .choose on the list
     sleep 1
-  end"]
+  end",
+"
+# Using choose for random sample onsets
+live_loop :foo do
+  sample :loop_amen, onset: choose   # choose a random onset value each time
+  sleep 0.125
+end"]
 
 
 
 
-      def pick(items, n=nil, *args)
+      def pick(*args)
+        if is_list_like?(args[0])
+          items = args[0]
+          if args[1].is_a? Numeric
+            n = args[1]
+            args.shift(2)
+          else
+            n = 1
+            args.shift(1)
+          end
+        else
+          items = nil
+          if args[0].is_a? Numeric
+            n = args[0]
+            args.shift(1)
+          else
+            n = 1
+          end
+        end
+
+        unless items
+          return lambda {|col| col.pick(n, *args)}
+        end
         items.pick(n, *args)
       end
       doc name:           :pick,
@@ -801,7 +1439,11 @@ end"
           accepts_block:  false,
           doc:            "Pick n elements from list or ring. Unlike shuffle, after each element has been picked, it is 'returned' to the list so it may be picked again. This means there may be duplicates in the result. If n is greater than the size of the ring/list then duplicates are guaranteed to be in the result.
 
-If `n` isn't supplied it defaults to the size of the list/ring.",
+If `n` isn't supplied it defaults to the size of the list/ring.
+
+If no arguments are given, will return a lambda function which when called takes an argument which will be a list to be picked from. This is useful for choosing random `onset:` vals for samples.
+
+Always returns a list-like thing (either an array or ring)",
          examples:       ["
 puts [1, 2, 3, 4, 5].pick(3) #=> [4, 4, 3]",
 "
@@ -810,7 +1452,14 @@ puts (ring 1, 2, 3, 4, 5).pick(3) #=> (ring 4, 4, 3)",
 "
 puts (ring 1, 2).pick(5) #=> (ring 2, 2, 1, 1, 1)",
 "
-puts (ring 1, 2, 3).pick #=> (ring 3, 3, 2)"
+puts (ring 1, 2, 3).pick #=> (ring 3, 3, 2)",
+"
+# Using pick for random sample onsets
+live_loop :foo do
+  sample :loop_amen, onset: pick   # pick a random onset value each time
+  sleep 0.125
+end"
+
       ]
 
 
@@ -886,7 +1535,7 @@ puts (ring 1, 2, 3).pick #=> (ring 3, 3, 2)"
         end
 
         in_thread(name: ll_name, delay: delay, sync: sync_sym, sync_bpm: sync_bpm_sym) do
-          Thread.current.thread_variable_set :sonic_pi__not_inherited__live_loop_auto_cue, auto_cue
+          __system_thread_locals.set_local :sonic_pi_local_live_loop_auto_cue, auto_cue
           if args_h.has_key?(:init)
             res = args_h[:init]
           else
@@ -895,17 +1544,17 @@ puts (ring 1, 2, 3).pick #=> (ring 3, 3, 2)"
           use_random_seed args_h[:seed] if args_h[:seed]
           loop do
             slept = block_slept? do
-              Thread.current.thread_variable_set(:sonic_pi_spider_synced, false)
-              cue name if Thread.current.thread_variable_get :sonic_pi__not_inherited__live_loop_auto_cue
+              __system_thread_locals.set(:sonic_pi_spider_synced, false)
+              cue name if __system_thread_locals.get :sonic_pi_local_live_loop_auto_cue
               res = send(ll_name, res)
             end
 
-            raise "Live loop #{name.to_sym.inspect} did not sleep!" unless slept or Thread.current.thread_variable_get(:sonic_pi_spider_synced)
+            raise "Live loop #{name.to_sym.inspect} did not sleep!" unless slept or __system_thread_locals.get(:sonic_pi_spider_synced)
           end
         end
 
         st = sthread(ll_name)
-        st.thread_variable_set :sonic_pi__not_inherited__live_loop_auto_cue, auto_cue if st
+        __system_thread_locals(st).set_local :sonic_pi_local_live_loop_auto_cue, auto_cue if st
         st
       end
       doc name:           :live_loop,
@@ -923,30 +1572,126 @@ puts (ring 1, 2, 3).pick #=> (ring 3, 3, 2)"
           requires_block: true,
           async_block:    true,
           intro_fn:       true,
-          doc:            "Run the block in a new thread with the given name, and loop it forever.  Also sends a `cue` with the same name each time the block runs. If the block is given a parameter, this is given the result of the last run of the loop (with initial value either being `0` or an init arg).
+          doc:            "Loop the do/end block forever. However, unlike a basic loop, a live_loop has two special properties. Firstly it runs in a thread - so you can have any number of live loops running at the same time (concurrently). Secondly, you can change the behaviour of a live loop whilst it is still running without needing to stop it. Live loops are therefore the secret to live coding with Sonic Pi.
 
-It is possible to delay the initial trigger of the live_loop on creation with both the `delay:` and `sync:` opts. See their respective docstrings. If both `delay:` and `sync:` are specified, on initial live_loop creation first the delay will be honoured and then the sync.
+As live loops are excecuted within a named in_thread, they behave similarly. See the in_thread documentation for all the details. However, it's worth mentioning a few important points here. Firstly, only one live loop with a given name can run at any one time. Therefore, if you define two or more `live_loop`s called `:foo` only one will be running. Another important aspect of `live_loop`s is that they manage their own thread locals set with the `use_*` and `with_*` fns. This means that each `live_loop` can have its own separate default synth, BPM and sample defaults. When a `live_loop` is *first* created, it inherits the thread locals from the parent thread, but once it has started, the only way to change them is by re-defining the do/end body of the `live_loop`. See the examples below for details. Finally, as mentioned above, provided their names are different, you may have many `live_loop`s executing at once.
+
+A typical way of live coding with live loops is to define a number of them in a buffer, hit Run to start them and then to modify their do/end blocks and then hit Run again. This will not create any more thread, but instead just modify the behaviour of the existing threads. The changes will *not* happen immediately. Instead, they will only happen the next time round the loop. This is because the behaviour of each live loop is implemented with a standard function. When a live loop is updated, the function definition is also updated. Each time round the live loop, the function is called, so the new behviour is only observed next time round the loop.
+
+Also sends a `cue` with the same name each time the `live_loop` repeats. This may be used to `sync` with other threads and `live_loop`s.
+
+If the `live_loop` block is given a parameter, this is given the result of the last run of the loop (with initial value either being `0` or an init arg). This allows you to 'thread' values across loops.
+
+Finally, it is possible to delay the initial trigger of the live_loop on creation with both the `delay:` and `sync:` opts. See their respective docstrings. If both `delay:` and `sync:` are specified, on initial live_loop creation first the delay will be honoured and then the sync.
 ",
           examples:       ["
-live_loop :ping do
-  sample :elec_ping
-  sleep 1
+## Define and start a simple live loop
+
+live_loop :ping do  # Create a live loop called :ping
+  sample :elec_ping # This live loops plays the :elec_ping sample
+  sleep 1           # Then sleeps for 1 beat before repeating
 end
   ",
 
         "
+## Every live loop must sleep or sync
+
+live_loop :ping do  # Create a live loop called :ping
+  sample :elec_ping # This live loops plays the :elec_ping sample
+                    # However, because the do/end lock of the live loop does not
+                    # contain any calls to sleep or sync, the live loop stops at
+                    # the end of the first loop with a 'Did not sleep' error.
+end",
+
+        "
+## Multiple live loops will play at the same time
+live_loop :foo do  # Start a live loop called :foo
+  play 70
+  sleep 1
+end
+
+live_loop :bar do  # Start another live loop called :bar
+  sample :bd_haus  # Both :foo and :bar will be playing
+  sleep 0.5        # at the same time.
+end
+",
+
+        "
+## Live loops inherit external use_* thread locals
+use_bpm 30
+live_loop :foo do
+  play 70           # live loop :foo now has a BPM of 30
+  sleep 1           # This sleep will be for 2 seconds
+end
+",
+
+        "
+## Live loops can have their own thread locals
+live_loop :foo do
+  use_bpm 30       # Set the BPM of live loop :foo to 30
+  play 70
+  sleep 1          # This sleep will be for 2 seconds
+end
+
+live_loop :bar do
+  use_bpm 120      # Set the BPM of live loop :bar to 120
+  play 82
+  sleep 1          # This sleep will be for 0.5 seconds
+end
+",
+
+        "
+## Live loops can pass values between iterations
 live_loop :foo do |a|  # pass a param (a) to the block (inits to 0)
   puts a               # prints out all the integers
   sleep 1
   a += 1               # increment a by 1 (last value is passed back into the loop)
 end
-  "   ]
+  ",
+
+        "
+## Live loop names must be unique
+live_loop :foo do  # Start a live loop called :foo
+  play 70
+  sleep 1
+end
+
+live_loop :foo do  # Attempt to start another also called :foo
+  sample :bd_haus  # With a different do/end block
+  sleep 0.5        # This will not start another live loop
+                   # but instead replace the behaviour of the first.
+end                # There will only be one live loop running playing
+                   # The bass drum
+",
+        "
+## You can sync multiple live loops together
+live_loop :foo, sync: :bar do # Wait for a :bar cue event before starting :foo
+ play 70                      # Live loop :foo is therefore blocked and does
+ sleep 1                      # not make a sound initially
+end
+
+sleep 4                       # Wait for 4 beats
+
+live_loop :bar do             # Start a live loop called :foo which will emit a :bar
+  sample :bd_haus             # cue message therefore releasing the :foo live loop.
+  sleep 0.5                   # Live loop :foo therefore starts and also inherits the
+end                           # logical time of live loop :bar.
+
+                              # This pattern is also useful to re-sync live loops after
+                              # errors are made. For example, when modifying live loop :foo
+                              # it is possible to introduce a runtime error which will stop
+                              # :foo but not :bar (as they are separate, isolated threads).
+                              # Once the error has been fixed and the code is re-run, :foo
+                              # will automatically wait for :bar to loop round and restart
+                              # in sync with the correct virtual clock."
+
+      ]
 
 
       def block_duration(&block)
-        t1 = Thread.current.thread_variable_get(:sonic_pi_spider_time)
+        t1 = __system_thread_locals.get(:sonic_pi_spider_time)
         block.call
-        t2 = Thread.current.thread_variable_get(:sonic_pi_spider_time)
+        t2 = __system_thread_locals.get(:sonic_pi_spider_time)
         t2 - t1
       end
       doc name:           :block_duration,
@@ -1063,7 +1808,9 @@ puts slept #=> Returns false as there were no sleeps in the block"]
           summary:        "Asynchronous Time. Run a block at the given time(s)",
           doc:            "Given a list of times, run the block once after waiting each given time. If passed an optional params list, will pass each param individually to each block call. If size of params list is smaller than the times list, the param values will act as rings (rotate through). If the block is given 1 arg, the times are fed through. If the block is given 2 args, both the times and the params are fed through. A third block arg will receive the index of the time.
 
-Note, all code within the block is executed in its own thread. Therefore despite inheriting all thread locals such as the random stream and ticks, modifications will be isolated to the block and will not affect external code.",
+Note, all code within the block is executed in its own thread. Therefore despite inheriting all thread locals such as the random stream and ticks, modifications will be isolated to the block and will not affect external code.
+
+`at is just-in-time scheduling using multiple isolated threads. See `time_warp` for ahead-of-time scheduling within the current thread",
           args:           [[:times, :list],
                            [:params, :list]],
           opts:           nil,
@@ -1163,7 +1910,7 @@ end
 
 
       def spark_graph(*values)
-        if (values.first.is_a?(Array) || values.first.is_a?(SonicPi::Core::RingVector)) && values.length == 1
+        if is_list_like?(values.first) && values.length == 1
           values = values.first
         end
 
@@ -1192,10 +1939,11 @@ end
 
         # Guard lists of length 1 or repeating vals
         range = 1.0 if range.to_f == 0.0
-
+        res = String.new("")
         values.map {|x|
-          @ticks[(((x - min) / range) * scale).round]
-        }.join
+          res << @ticks[(((x - min) / range) * scale).round]
+        }
+        return res
       end
       doc name:           :spark_graph,
           introduced:     Version.new(2,5,0),
@@ -1224,8 +1972,8 @@ end
           accepts_block:  false,
           doc:            "Given a list of numeric values, this method turns them into a string of bar heights and prints them out. Useful for quickly graphing the shape of an array.",
           examples:       [
-  "spark (range 1, 5))    #=> ▁▃▅█",
-  "spark (range 1, 5).shuffle) #=> ▃█▅▁"
+  "spark (range 1, 5)    #=> ▁▃▅█",
+  "spark (range 1, 5).shuffle #=> ▃█▅▁"
       ]
 
 
@@ -1422,28 +2170,8 @@ end
 
 
 
-      def inspect(*msgs)
-        output = msgs.map{|m| m.inspect}.join(", ")
-        __delayed_user_message output
-      end
-      doc name:          :inspect,
-          introduced:     Version.new(2,8,0),
-          summary:       "Display inspected information in the output pane",
-          args:          [[:output, :anything]],
-          opts:          nil,
-          accepts_block: false,
-          intro_fn:       true,
-          doc:           "Displays the information you specify as an inspected string inside the output pane. This can be a number, symbol, or a string itself.",
-          examples:      [
-  "print \"hello there\" #=> will print the string \"hello there\" to the output pane with quotes",
-  "print 5               #=> will print the number 5 to the output pane",
-  "print :foo            #=> will print the :foo to the output pane"]
-
-
-
-
       def print(*msgs)
-        output = msgs.map{|m| m.to_s}.join(" ")
+        output = msgs.map{|m| m.inspect}.join(" ")
         __delayed_user_message output
       end
       doc name:          :print,
@@ -1463,7 +2191,7 @@ end
 
 
       def puts(*msgs)
-        output = msgs.map{|m| m.to_s}.join(" ")
+        output = msgs.map{|m| m.inspect}.join(" ")
         __delayed_user_message output
       end
       doc name:           :puts,
@@ -1727,7 +2455,61 @@ end
           accepts_block:  false,
           doc:            "Given a max number, produces a whole number between `0` and the supplied max value exclusively. If max is a range produces an int within the range. With no args returns either `0` or `1`",
           examples:       ["
-  print rand_i(5) #=> will print a either 0, 1, 2, 3, or 4 to the output pane"]
+  print rand_i(5) #=> will print either 0, 1, 2, 3, or 4 to the output pane"]
+
+
+      def rand_look(*args)
+        res = rand(*args)
+        rand_back
+        res
+      end
+      doc name:           :rand_look,
+          introduced:     Version.new(2,11,0),
+          summary:        "Generate a random number without consuming a rand",
+          args:           [[:max, :number_or_range]],
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Given a max number, produces a number between `0` and the supplied max value exclusively. If max is a range produces an int within the range. With no args returns a value between `0` and `1`.
+
+Does not consume a random value from the stream. Therefore, multiple sequential calls to `rand_look` will all return the same value.",
+          examples:       ["
+  print rand_look(0.5) #=> will print a number like 0.375030517578125 to the output pane",
+
+        "
+  print rand_look(0.5) #=> will print a number like 0.375030517578125 to the output pane
+  print rand_look(0.5) #=> will print the same number again
+  print rand_look(0.5) #=> will print the same number again
+  print rand_(0.5) #=> will print a different random number
+  print rand_look(0.5) #=> will print the same number as the prevoius line again."
+      ]
+
+
+
+
+      def rand_i_look(*args)
+        res = rand_i(*args)
+        rand_back
+        res
+      end
+      doc name:           :rand_i_look,
+          introduced:     Version.new(2,11,0),
+          summary:        "Generate a random whole number without consuming a rand",
+          args:           [[:max, :number_or_range]],
+          opts:           nil,
+          accepts_block:  false,
+          doc:            "Given a max number, produces a whole number between `0` and the supplied max value exclusively. If max is a range produces an int within the range. With no args returns either `0` or `1`.
+
+Does not consume a random value from the stream. Therefore, multiple sequential calls to `rand_i_look` will all return the same value.",
+          examples:       ["
+print rand_i_look(5) #=> will print either 0, 1, 2, 3, or 4 to the output pane",
+
+        "
+print rand_i_look(5) #=> will print either 0, 1, 2, 3, or 4 to the output pane
+print rand_i_look(5) #=> will print the same number again
+print rand_i_look(5) #=> will print the same number again
+print rand_i(5) #=> will print either 0, 1, 2, 3, or 4 to the output pane
+print rand_i_look(5) #=> will print the same number as the previous statement"
+      ]
 
 
 
@@ -1859,7 +2641,7 @@ end
 
       def use_random_seed(seed, &block)
         raise "use_random_seed does not work with a block. Perhaps you meant with_random_seed" if block
-        Thread.current.thread_variable_set :sonic_pi_spider_new_thread_random_gen_idx, 0
+        __thread_locals.set :sonic_pi_spider_new_thread_random_gen_idx, 0
 
         SonicPi::Core::SPRand.set_seed! seed
       end
@@ -1911,14 +2693,14 @@ end
 
       def with_random_seed(seed, &block)
         raise "with_random_seed requires a block. Perhaps you meant use_random_seed" unless block
-        new_thread_gen_idx = Thread.current.thread_variable_get :sonic_pi_spider_new_thread_random_gen_idx
+        new_thread_gen_idx = __thread_locals.get :sonic_pi_spider_new_thread_random_gen_idx
 
         current_seed, current_idx = SonicPi::Core::SPRand.get_seed_and_idx
         SonicPi::Core::SPRand.set_seed! seed
-        Thread.current.thread_variable_set :sonic_pi_spider_new_thread_random_gen_idx, 0
+        __thread_locals.set :sonic_pi_spider_new_thread_random_gen_idx, 0
         res = block.call
         SonicPi::Core::SPRand.set_seed! current_seed, current_idx
-        Thread.current.thread_variable_set :sonic_pi_spider_new_thread_random_gen_idx, new_thread_gen_idx
+        __thread_locals.set :sonic_pi_spider_new_thread_random_gen_idx, new_thread_gen_idx
         res
       end
       doc name:           :with_random_seed,
@@ -1987,7 +2769,7 @@ end
 
       def use_cue_logging(v, &block)
         raise "use_cue_logging does not work with a do/end block. Perhaps you meant with_cue_logging" if block
-        Thread.current.thread_variable_set(:sonic_pi_suppress_cue_logging, !v)
+        __thread_locals.set(:sonic_pi_suppress_cue_logging, !v)
       end
       doc name:          :use_cue_logging,
           introduced:    Version.new(2,6,0),
@@ -2003,10 +2785,10 @@ end
 
       def with_cue_logging(v, &block)
         raise "with_cue_logging requires a do/end block. Perhaps you meant use_cue_logging" unless block
-        current = Thread.current.thread_variable_get(:sonic_pi_suppress_cue_logging)
-        Thread.current.thread_variable_set(:sonic_pi_suppress_cue_logging, !v)
+        current = __thread_locals.get(:sonic_pi_suppress_cue_logging)
+        __thread_locals.set(:sonic_pi_suppress_cue_logging, !v)
         block.call
-        Thread.current.thread_variable_set(:sonic_pi_suppress_cue_logging, current)
+        __thread_locals.set(:sonic_pi_suppress_cue_logging, current)
       end
       doc name:          :with_cue_logging,
           introduced:    Version.new(2,6,0),
@@ -2040,7 +2822,7 @@ end
         raise "use_bpm does not work with a block. Perhaps you meant with_bpm" if block
         raise "use_bpm's BPM should be a positive value. You tried to use: #{bpm}" unless bpm > 0
         sleep_mul = 60.0 / bpm
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, sleep_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, sleep_mul)
       end
       doc name:           :use_bpm,
           introduced:     Version.new(2,0,0),
@@ -2093,11 +2875,11 @@ end
       def with_bpm(bpm, &block)
         raise "with_bpm must be called with a do/end block. Perhaps you meant use_bpm" unless block
         raise "with_bpm's BPM should be a positive value. You tried to use: #{bpm}" unless bpm > 0
-        current_mul = Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        current_mul = __thread_locals.get(:sonic_pi_spider_sleep_mul)
         sleep_mul = 60.0 / bpm
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, sleep_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, sleep_mul)
         res = block.call
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, current_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, current_mul)
         res
       end
       doc name:           :with_bpm,
@@ -2150,12 +2932,12 @@ end
 
       def with_bpm_mul(mul, &block)
         raise "with_bpm_mul must be called with a do/end block. Perhaps you meant use_bpm_mul" unless block
-        raise "use_bpm_mul's mul should be a positive value. You tried to use: #{mul}" unless mul > 0
-        current_mul = Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        raise "with_bpm_mul's mul should be a positive value. You tried to use: #{mul}" unless mul > 0
+        current_mul = __thread_locals.get(:sonic_pi_spider_sleep_mul)
         new_mul = current_mul.to_f / mul
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, new_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, new_mul)
         res = block.call
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, current_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, current_mul)
         res
       end
       doc name:           :with_bpm_mul,
@@ -2186,9 +2968,9 @@ end
       def use_bpm_mul(mul, &block)
         raise "use_bpm_mul must not be called with a block. Perhaps you meant with_bpm_mul" if block
         raise "use_bpm_mul's mul should be a positive value. You tried to use: #{mul}" unless mul > 0
-        current_mul = Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        current_mul = __thread_locals.get(:sonic_pi_spider_sleep_mul)
         new_mul = current_mul.to_f / mul
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, new_mul)
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, new_mul)
       end
       doc name:           :use_bpm_mul,
           introduced:     Version.new(2,3,0),
@@ -2214,8 +2996,10 @@ end
 
       def density(d, &block)
         raise "density must be called with a do/end block." unless block
-        raise "density must be a positive number. Got: #{d.inspect}." unless d.is_a?(Numeric) && d >= 0
+        raise "density must be a positive number. Got: #{d.inspect}." unless d.is_a?(Numeric) && d > 0
         reps = d < 1 ? 1.0 : d
+        prev_density = __thread_locals.get(:sonic_pi_local_spider_density) || 1.0
+        __thread_locals.set_local(:sonic_pi_local_spider_density, prev_density * d)
         with_bpm_mul d do
           if block.arity == 0
             reps.times do
@@ -2227,6 +3011,7 @@ end
             end
           end
         end
+        __thread_locals.set_local(:sonic_pi_local_spider_density, prev_density)
       end
       doc name:           :density,
           introduced:     Version.new(2,3,0),
@@ -2240,7 +3025,7 @@ end
 
   density 2 do       # BPM for block is now 120
                      # block is called 2.times
-    sample :bd_hause # sample is played twice
+    sample :bd_haus # sample is played twice
     sleep 0.5        # sleep is 0.25s
   end",
 
@@ -2268,7 +3053,7 @@ end
           summary:       "Get current random seed",
           doc:           "Returns the current random seed.
 
-This can be set via the fns `use_random_seed` and `with_random_seed. It is incremented every time you use the random number generator via fns such as `choose` and `rand`.",
+This can be set via the fns `use_random_seed` and `with_random_seed`. It is incremented every time you use the random number generator via fns such as `choose` and `rand`.",
           args:          [],
           opts:          nil,
           accepts_block: false,
@@ -2289,7 +3074,7 @@ puts rand               #=> 0.24249267578125
 
 
       def current_bpm
-        60.0 / Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        60.0 / __thread_locals.get(:sonic_pi_spider_sleep_mul)
       end
       doc name:          :current_bpm,
           introduced:    Version.new(2,0,0),
@@ -2307,7 +3092,7 @@ This can be set via the fns `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sa
 
 
       def current_beat_duration
-        Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        __thread_locals.get(:sonic_pi_spider_sleep_mul)
       end
       doc name:          :current_beat_duration,
           introduced:    Version.new(2,6,0),
@@ -2329,7 +3114,7 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 
 
       def beat
-        Thread.current.thread_variable_get(:sonic_pi_spider_beat)
+        __system_thread_locals.get(:sonic_pi_spider_beat)
       end
       doc name:          :beat,
           introduced:    Version.new(2,10,0),
@@ -2351,7 +3136,7 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 
 
       def rt(t)
-        t / Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        t / __thread_locals.get(:sonic_pi_spider_sleep_mul)
       end
       doc name:          :rt,
           introduced:    Version.new(2,0,0),
@@ -2372,7 +3157,7 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 
 
       def bt(t)
-        t * Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        t * __thread_locals.get(:sonic_pi_spider_sleep_mul)
       end
       doc name:          :bt,
           introduced:    Version.new(2,8,0),
@@ -2391,27 +3176,30 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 "]
 
 
-
+      def __current_sched_ahead_time
+        @mod_sound_studio.sched_ahead_time
+      end
 
       def sleep(beats)
         # Schedule messages
         __schedule_delayed_blocks_and_messages!
-        curr_beat = Thread.current.thread_variable_get(:sonic_pi_spider_beat)
-        Thread.current.thread_variable_set(:sonic_pi_spider_beat, curr_beat + beats)
-
+        curr_beat = __system_thread_locals.get(:sonic_pi_spider_beat)
+        __system_thread_locals.set(:sonic_pi_spider_beat, curr_beat + beats)
         return if beats == 0
         # Grab the current virtual time
-        last_vt = Thread.current.thread_variable_get :sonic_pi_spider_time
+        last_vt = __system_thread_locals.get :sonic_pi_spider_time
+
+        in_time_warp = __system_thread_locals.get(:sonic_pi_spider_in_time_warp)
 
         # Now get on with syncing the rest of the sleep time...
 
         # Calculate the amount of time to sleep (take into account current bpm setting)
-        sleep_time = beats * Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul)
+        sleep_time = beats * __thread_locals.get(:sonic_pi_spider_sleep_mul)
         # Calculate the new virtual time
         new_vt = last_vt + sleep_time
 
         # TODO: remove this, api shouldn't need to know about sound module
-        sat = @mod_sound_studio.sched_ahead_time
+        sat = __current_sched_ahead_time
         now = Time.now
         if now - (sat + 0.5) > new_vt
           raise "Timing Exception: thread got too far behind time"
@@ -2435,16 +3223,22 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
           Thread.current.priority = p
           ## TODO: Remove this and replace with a much better silencing system which
           ## is implemented within the __delayed_* fns
-          unless Thread.current.thread_variable_get(:sonic_pi_mod_sound_synth_silent)
+          unless __thread_locals.get(:sonic_pi_mod_sound_synth_silent) || in_time_warp
             __delayed_warning "Timing warning: running slightly behind..."
           end
         else
-          Kernel.sleep new_vt - now
+          if in_time_warp
+            # Don't sleep if within a time shift
+            # However, do make sure the vt hasn't got too far ahead of the real time
+             raise "Timing Exception: thread got too far ahead of time" if  (new_vt - 17) > now
+          else
+            Kernel.sleep new_vt - now
+          end
         end
 
-        Thread.current.thread_variable_set :sonic_pi_spider_time, new_vt
+        __system_thread_locals.set :sonic_pi_spider_time, new_vt.freeze
         ## reset control deltas now that time has advanced
-        Thread.current.thread_variable_set :sonic_pi_control_deltas, {}
+        __system_thread_locals.set_local :sonic_pi_local_control_deltas, {}
       end
       doc name:           :sleep,
           introduced:     Version.new(2,0,0),
@@ -2513,43 +3307,56 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 
 
       def cue(cue_id, *opts)
-        args_h = resolve_synth_opts_hash_or_array(opts)
-        args_h.each do |k, v|
-          raise "Invalid cue key type. Must be a Symbol" unless k.is_a? Symbol
-          raise "Invalid cue value type (#{v.class}) for key #{k.inspect}. Must be immutable - currently accepted types: Numbers, Symbols and Booleans." unless v.is_a?(Numeric) || v.is_a?(Symbol) || v.is_a?(TrueClass) || v.is_a?(FalseClass)
+
+        if opts.size == 1 && opts[0].is_a?(Hash)
+          opts[0].each do |k, v|
+            raise "Invalid cue key type. Must be a Symbol" unless k.is_a? Symbol
+            raise "Invalid cue argument #{v.inspect} with key #{k.inspect} due to unrecognised type: (#{v.class}). Must be immutable -  currently accepted types: numbers, symbols, booleans, nil and frozen strings, or vectors/rings/frozen arrays/maps of immutable values" unless v.sp_thread_safe?
+          end
+          splat_map_or_arr = opts[0]
+        else
+          opts.each_with_index do |v, idx|
+            v = v.freeze
+            raise "Invalid cue argument #{v.inspect} in position #{idx} due to unrecognised type: (#{v.class}). Must be immutable -  currently accepted types: numbers, symbols, booleans, nil and frozen strings, or vectors/rings/frozen arrays/maps of immutable values" unless v.sp_thread_safe?
+          end
+          splat_map_or_arr = opts.freeze
         end
 
-
         payload = {
-          :time => Thread.current.thread_variable_get(:sonic_pi_spider_time),
-          :sleep_mul => Thread.current.thread_variable_get(:sonic_pi_spider_sleep_mul),
-          :beat => Thread.current.thread_variable_get(:sonic_pi_spider_beat),
+          :time => __system_thread_locals.get(:sonic_pi_spider_time),
+          :sleep_mul => __thread_locals.get(:sonic_pi_spider_sleep_mul),
+          :beat => __system_thread_locals.get(:sonic_pi_spider_beat),
           :run => current_job_id,
-          :cue_map => args_h,
+          :cue_splat_map_or_arr => splat_map_or_arr,
           :cue => cue_id
         }
 
-        unless Thread.current.thread_variable_get(:sonic_pi_suppress_cue_logging)
-          if args_h.empty?
+        unless __thread_locals.get(:sonic_pi_suppress_cue_logging)
+          if splat_map_or_arr.empty?
             __delayed_highlight_message "cue #{cue_id.inspect}"
           else
-            __delayed_highlight_message "cue #{cue_id.inspect}, #{arg_h_pp(args_h)}"
+            if is_list_like?(splat_map_or_arr)
+              __delayed_highlight_message "cue #{cue_id.inspect}, #{splat_map_or_arr}"
+            else
+              __delayed_highlight_message "cue #{cue_id.inspect}, #{arg_h_pp(splat_map_or_arr)}"
+
+            end
           end
         end
 
         Thread.new do
-          Thread.current.thread_variable_set(:sonic_pi_thread_group, :cue)
+          __system_thread_locals.set_local(:sonic_pi_local_thread_group, :cue)
           # sleep for a tiny amount of wall-clock time to give other temporally
           # synced threads real time to register syncs at similar virtual
           # times.
-          Kernel.sleep @sync_real_sleep_time
-          @events.async_event("/spider_thread_sync/" + cue_id.to_s, payload)
+          Kernel.sleep @sync_real_sleep_time || 0
+          __events.async_event("/spider_thread_sync/" + cue_id.to_s, payload)
         end
       end
       doc name:           :cue,
           introduced:     Version.new(2,0,0),
           summary:        "Cue other threads",
-          doc:            "Send a heartbeat synchronisation message containing the (virtual) timestamp of the current thread. Useful for syncing up external threads via the `sync` fn. Any opts which are passed are given to the thread which syncs on the `cue_id` as a map. The values of the opts must be immutable. Currently only numbers, symbols and booleans are supported.",
+          doc:            "Send a heartbeat synchronisation message containing the (virtual) timestamp of the current thread. Useful for syncing up external threads via the `sync` fn. Any opts which are passed are given to the thread which syncs on the `cue_id`. The values of the opts must be immutable. Currently numbers, symbols, booleans, nil and frozen strings, or vectors/rings/frozen arrays/maps of immutable values are supported.",
           args:           [[:cue_id, :symbol]],
           opts:           {:your_key    => "Your value",
                            :another_key => "Another value",
@@ -2627,13 +3434,17 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
   end",
       ]
 
-      def sync_bpm(cue_ids, opts={})
+      def sync_bpm(*args)
+        cue_ids = (args.take_while {|v| v.is_a?(Symbol) || v.is_a?(String) || is_list_like?(v)} ) || []
+        opts = args[cue_ids.size] || {}
+        cue_ids.flatten!
+        raise "Opts for sync_bpm must be a map, got a #{opts.class} - #{opts.inspect}" unless opts.is_a?(Hash)
         sync cue_ids, opts.merge({bpm_sync: true})
       end
       doc name:           :sync_bpm,
           introduced:     Version.new(2,10,0),
           summary:        "Sync and inherit BPM from other threads ",
-          doc:            "An alias for `sync` with the `bpm_sync:` opt set to true.`",
+          doc:            "An alias for `sync` with the `bpm_sync:` opt set to true.",
           args:           [[:cue_id, :symbol]],
           opts:           {},
           accepts_block:  false,
@@ -2641,55 +3452,69 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
           examples:       ["See examples for sync"]
 
 
-      def sync(cue_ids, opts={})
-        cue_ids = [cue_ids] if cue_ids.is_a?(Symbol) || cue_ids.is_a?(String) || cue_ids.is_a?(SPSym)
+      def sync(*cues, &blk)
+        cue_ids = (cues.take_while {|v| v.is_a?(Symbol) || v.is_a?(String) || is_list_like?(v)} ) || []
+        opts = cues[cue_ids.size] || {}
+        cue_ids.flatten!
+        raise "Opts for sync must be a map, got a #{opts.class} - #{opts.inspect}" unless opts.is_a?(Hash)
+        raise "Timing Exception - you may not sync within a time_warp" if __system_thread_locals.get :sonic_pi_spider_in_time_warp
         raise "sync needs at least one cue id to sync on. You specified 0" unless cue_ids.size > 0
-        Thread.current.thread_variable_set(:sonic_pi_spider_synced, true)
+        __system_thread_locals.set(:sonic_pi_spider_synced, true)
         p = Promise.new
         handles = cue_ids.map {|id| "/spider_thread_sync/" + id.to_s}
-        @events.async_multi_oneshot_handler(handles) do |payload|
+
+        __events.async_multi_oneshot_handler(handles) do |payload|
           p.deliver! payload
         end
 
-        unless Thread.current.thread_variable_get(:sonic_pi_suppress_cue_logging)
+        unless __thread_locals.get(:sonic_pi_suppress_cue_logging)
           if cue_ids.size == 1
             __delayed_highlight3_message "sync #{cue_ids.first.inspect}"
           else
-            ids_list = cue_ids.map{|cid| cid.to_sym}
-            __delayed_highlight3_message "sync #{ids_list.inspect}"
+            __delayed_highlight3_message "sync #{cue_ids.inspect}"
           end
         end
 
         __schedule_delayed_blocks_and_messages!
 
+        blk.call if block_given?
         payload = p.get
         time = payload[:time]
         sleep_mul = payload[:sleep_mul]
         beat = payload[:beat]
         bpm_sync = opts.has_key?(:bpm_sync) ? opts[:bpm_sync] : false
         run_id = payload[:run]
-        cue_map = payload[:cue_map]
-        cue_map = cue_map.dup if cue_map
-        cue_map = cue_map || {}
-        cue_id = payload[:cue]
-        cue_map[:cue] = cue_id
-        Thread.current.thread_variable_set :sonic_pi_spider_beat, beat
-        Thread.current.thread_variable_set :sonic_pi_spider_time, time
-        Thread.current.thread_variable_set(:sonic_pi_spider_sleep_mul, sleep_mul) if bpm_sync
-
-        unless Thread.current.thread_variable_get(:sonic_pi_suppress_cue_logging)
-          if bpm_sync
-            __delayed_highlight2_message "synced #{cue_id.inspect}. Inheriting bpm of #{current_bpm} (Run #{run_id})"
+        run_info = run_id ? "(Run #{run_id})" : "(OSC)"
+        if payload[:cue_splat_map_or_arr]
+          if is_list_like?(payload[:cue_splat_map_or_arr])
+            res = payload[:cue_splat_map_or_arr]
           else
-            __delayed_highlight2_message "synced #{cue_id.inspect} (Run #{run_id})"
+            res = SonicPi::Core::SPSplatMap.new(payload[:cue_splat_map_or_arr])
+          end
+        else
+          res = SonicPi::Core::SPSplatMap.new({})
+        end
+
+        cue_id = payload[:cue]
+        __system_thread_locals.set :sonic_pi_spider_beat, beat if beat
+        __system_thread_locals.set :sonic_pi_spider_time, time.freeze if time
+        __thread_locals.set(:sonic_pi_spider_sleep_mul, sleep_mul) if bpm_sync
+
+
+        unless __thread_locals.get(:sonic_pi_suppress_cue_logging)
+          if bpm_sync
+
+            __delayed_highlight2_message "synced #{cue_id.inspect}. Inheriting bpm of #{current_bpm} " + run_info
+          else
+            __delayed_highlight2_message "synced #{cue_id.inspect} " + run_info
           end
         end
-        cue_map
+        res
       end
       doc name:           :sync,
           introduced:     Version.new(2,0,0),
           summary:        "Sync with other threads",
-          doc:            "Pause/block the current thread until a `cue` heartbeat with a matching `cue_id` is received. When a matching `cue` message is received, unblock the current thread, and continue execution with the virtual time set to match the thread that sent the `cue` heartbeat. The current thread is therefore synced to the `cue` thread. If multiple cue ids are passed as arguments, it will `sync` on the first matching `cue_id`. By default the BPM of the cueing thread is inherited. This can be disabled using the bpm_sync: opt.",
+          doc:            "Pause/block the current thread until a `cue` heartbeat with a matching `cue_id` is received. When a matching `cue` message is received, unblock the current thread, and continue execution with the virtual time set to match the thread that sent the `cue` heartbeat. The current thread is therefore synced to the `cue` thread. If multiple cue ids are passed as arguments, it will `sync` on the first matching `cue_id`. The BPM of the cueing thread can optionally be inherited by using the bpm_sync: opt.",
           args:           [[:cue_id, :symbol]],
           opts:           {:bpm_sync => "Inherit the BPM of the cueing thread. Default is false"},
           accepts_block:  false,
@@ -2770,18 +3595,6 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
 
         # Get copy of thread locals whilst we're sure they're not being modified
         # as we're in the thread parent_t
-        parent_t_vars = {}
-        parent_t.thread_variables.each do |v|
-          parent_t_vars[v] = parent_t.thread_variable_get(v)
-        end
-
-        # clone the thread local counters rather than grabbing them as they're mutable.
-        # do this here in the parent thread so we know they're not being modified.
-        if parent_t_vars[:sonic_pi_core_thread_local_counters]
-          cloned_thread_local_counters = parent_t_vars[:sonic_pi_core_thread_local_counters].clone
-        else
-          cloned_thread_local_counters = nil
-        end
 
         job_id = __current_job_id
         reg_with_parent_completed = Promise.new
@@ -2789,60 +3602,63 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
         if args_h[:seed]
           new_rand_seed = args_h[:seed]
         else
-          new_thread_gen_idx = Thread.current.thread_variable_get :sonic_pi_spider_new_thread_random_gen_idx
+          new_thread_gen_idx = __thread_locals.get :sonic_pi_spider_new_thread_random_gen_idx
           new_rand_seed = SonicPi::Core::SPRand.rand!(441000, new_thread_gen_idx)
-          Thread.current.thread_variable_set :sonic_pi_spider_new_thread_random_gen_idx, new_thread_gen_idx + 1
+          __thread_locals.set :sonic_pi_spider_new_thread_random_gen_idx, new_thread_gen_idx + 1
         end
+
+        new_tls = SonicPi::Core::ThreadLocal.new(__thread_locals, SonicPi::Core::SPRand.tl_seed_map(new_rand_seed + SonicPi::Core::SPRand.get_seed, 0))
+
+        new_system_tls = SonicPi::Core::ThreadLocal.new(__system_thread_locals)
+
         # Create the new thread
         t = Thread.new do
-          Thread.current.thread_variable_set(:sonic_pi_thread_group, :job_subthread)
+          # Copy thread locals across from parent thread to this new thread
+          __thread_locals_reset!(new_tls)
+          __system_thread_locals_reset!(new_system_tls)
+          __system_thread_locals.set_local(:sonic_pi_local_thread_group, :job_subthread)
 
           main_t = Thread.current
           main_t.priority = 10
 
           Thread.new do
             if name
-              Thread.current.thread_variable_set(:sonic_pi_thread_group, "in_thread_join_#{name}")
+              __system_thread_locals.set_local(:sonic_pi_local_thread_group, "in_thread_join_#{name}".freeze)
             else
-              Thread.current.thread_variable_set(:sonic_pi_thread_group, :in_thread_join)
+              __system_thread_locals.set_local(:sonic_pi_local_thread_group, :in_thread_join)
             end
             Thread.current.priority = -10
             # wait for all subthreads to finish before removing self from
-            # the subthread tree
+            # the parent subthread tree
             main_t.join
             __join_subthreads(main_t)
-            parent_t.thread_variable_get(:sonic_pi_spider_subthread_mutex).synchronize do
-              parent_t.thread_variable_get(:sonic_pi_spider_subthreads).delete(main_t)
+
+            __system_thread_locals(parent_t).get(:sonic_pi_local_spider_subthread_mutex).synchronize do
+              __current_subthreads.delete(main_t)
             end
           end
 
+          __system_thread_locals.set_local :sonic_pi_local_spider_users_thread_name, name if name
 
-          # Copy thread locals across from parent thread to this new thread
-          parent_t_vars.each do |k,v|
-            Thread.current.thread_variable_set(k, v) unless k.to_s.start_with? "sonic_pi__not_inherited__"
-          end
+          __system_thread_locals.set_local :sonic_pi_local_spider_delayed_blocks, []
+          __system_thread_locals.set_local :sonic_pi_local_spider_delayed_messages, []
+          __system_thread_locals.set_local :sonic_pi_local_control_deltas, {}
 
-
-          Thread.current.thread_variable_set :sonic_pi_spider_users_thread_name, name if name
-
-          Thread.current.thread_variable_set :sonic_pi_spider_delayed_blocks, []
-          Thread.current.thread_variable_set :sonic_pi_spider_delayed_messages, []
-          Thread.current.thread_variable_set(:sonic_pi_core_thread_local_counters, cloned_thread_local_counters) if cloned_thread_local_counters
 
           # Reset subthreads thread local to the empty set. This shouldn't
           # be inherited from the parent thread.
-          Thread.current.thread_variable_set :sonic_pi_spider_subthreads, Set.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_subthreads, Set.new
 
           # Give new thread a new subthread mutex
-          Thread.current.thread_variable_set :sonic_pi_spider_subthread_mutex, Mutex.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_subthread_mutex, Mutex.new
 
           # Give new thread a new no_kill mutex This reduces contention
           # over the alternative of a global no_kill mutex.  Killing a Run
           # then essentially turns into waiting for each no_kill mutext for
           # every sub-in_thread before killing them.
-          Thread.current.thread_variable_set :sonic_pi_spider_no_kill_mutex, Mutex.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_no_kill_mutex, Mutex.new
 
-          SonicPi::Core::SPRand.set_seed!(new_rand_seed + SonicPi::Core::SPRand.get_seed)
+
 
 
           # Wait for parent to deliver promise. Throws an exception if
@@ -2865,6 +3681,7 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
             # thread:
             __schedule_delayed_blocks_and_messages!
           rescue Stop => e
+            __schedule_delayed_blocks_and_messages!
             if name
               __info("Stopping thread #{name.inspect}")
             else
@@ -2872,6 +3689,7 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
               __schedule_delayed_blocks_and_messages!
             end
           rescue Exception => e
+            __schedule_delayed_blocks_and_messages!
             if name
               __error e, "Thread death +--> #{name.inspect}"
             else
@@ -2879,6 +3697,10 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
             end
 
           end
+
+          # Wait for any trackers by blocking on all promises until
+          # All have been delivered
+          __current_tracker.get
 
           # Disassociate thread with job as it has now finished
           job_subthread_rm(job_id, Thread.current)
@@ -2891,8 +3713,8 @@ Affected by calls to `use_bpm`, `with_bpm`, `use_sample_bpm` and `with_sample_bp
         # thread will only continue exiting after it has been sucessfully
         # registered.
 
-        parent_t.thread_variable_get(:sonic_pi_spider_subthread_mutex).synchronize do
-          subthreads = parent_t.thread_variable_get :sonic_pi_spider_subthreads
+        __system_thread_locals(parent_t).get(:sonic_pi_local_spider_subthread_mutex).synchronize do
+          subthreads = __system_thread_locals(parent_t).get :sonic_pi_local_spider_subthreads
           subthreads.add(t)
         end
 
@@ -3079,9 +3901,38 @@ assert_equal [:a, :b, :c].size,  3 # ensure lists can be correctly counted
 assert_equal 3, 5, \"something is seriously wrong!\"
 " ]
 
+      def assert_similar(a, b, msg=nil)
+        case a
+          when Numeric
+          assert_equal(a.to_f.round(8), b.to_f.round(8), msg)
+        else
+          assert_equal(a, b, msg)
+        end
+      end
+      doc name:           :assert_similar,
+          introduced:     Version.new(2,12,0),
+          summary:        "Ensure args are similar",
+          doc:            "Raises an exception if both arguments aren't similar.
+
+Currently similarity is only defined for numbers - all other types are compared for equality with assert_equal.
+
+Useful for testing in cases where floating point imprecision stops you from being able to use `assert_equal`. ",
+          args:           [[:arg1, :anything], [:arg2, :anything]],
+          alt_args:       [[:arg1, :anything], [:arg2, :anything],[:error_msg, :string]],
+          opts:           nil,
+          accepts_block:  false,
+          examples:       ["
+# Simple assertions
+assert_similar 1, 1 #=> True
+",
+"
+# Handles floating point imprecision
+assert_similar(4.9999999999, 5.0) #=> True"
+      ]
+
       def load_buffer(path)
         path = File.expand_path(path.to_s)
-        raise "Unable to load buffer - no file found with path: #{path}" unless File.exists?(path)
+        raise "Unable to load buffer - no file found with path: #{path}" unless File.exist?(path)
         buf = __current_job_info[:workspace]
         __info "loading #{buf} with #{path}"
         __replace_buffer(buf, File.read(path))
@@ -3116,9 +3967,9 @@ load_buffer \"~/sonic-pi-tracks/phat-beats.rb\" # will replace content of curren
 load_example :rerezzed # will replace content of current buffer with the rerezzed example"]
 
       def __on_thread_death(&block)
-        gc_jobs = Thread.current.thread_variable_get(:sonic_pi__not_inherited__spider_in_thread_gc_jobs) || []
+        gc_jobs = __system_thread_locals.get(:sonic_pi_local_spider_in_thread_gc_jobs) || []
         gc_jobs << block
-        Thread.current.thread_variable_set(:sonic_pi__not_inherited__spider_in_thread_gc_jobs, gc_jobs)
+        __system_thread_locals.set_local(:sonic_pi_local_spider_in_thread_gc_jobs, gc_jobs)
       end
     end
   end

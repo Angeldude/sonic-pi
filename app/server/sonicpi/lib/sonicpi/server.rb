@@ -21,6 +21,7 @@ require_relative "counter"
 require_relative "lazybuffer"
 require_relative "bufferstream"
 require_relative "scsynthexternal"
+
 #require_relative "scsynthnative"
 
 
@@ -28,9 +29,9 @@ module SonicPi
   class Server
     include Util
 
-    attr_accessor :current_node_id,  :debug, :mouse_y, :mouse_x, :sched_ahead_time, :control_delta
+    attr_accessor :current_node_id,  :debug, :mouse_y, :mouse_x, :sched_ahead_time, :control_delta, :scsynth_info
 
-    def initialize(hostname, port, msg_queue)
+    def initialize(hostname, port, send_port, msg_queue)
       # Cache common OSC path strings as frozen instance
       # vars to reduce object creation cost and GC load
       @osc_path_quit        = "/quit".freeze
@@ -65,12 +66,8 @@ module SonicPi
       #TODO: Might want to make this available more globally so it can
       #be dynamically turned on and off
       @debug_mode = debug_mode
-
-      @PORT = port
-
       @osc_events = IncomingEvents.new(:internal_events, -10)
-
-      @scsynth = SCSynthExternal.new(@osc_events)
+      @scsynth = SCSynthExternal.new(@osc_events, scsynth_port: port, scsynth_send_port: send_port)
 
       @position_codes = {
         head: 0,
@@ -85,20 +82,51 @@ module SonicPi
         @scsynth.shutdown
       end
 
+      request_notifications
+
       # Push all incoming OSC messages to the event system
 
 
       @CURRENT_NODE_ID = Counter.new(1)
       @CURRENT_SYNC_ID = Counter.new(0)
-      @BUFFER_ALLOCATOR = Allocator.new(1024) # TODO: Another magic num to remove
-      @AUDIO_BUS_ALLOCATOR = AudioBusAllocator.new num_audio_busses_for_current_os, 10 #TODO: remove these magic nums
-      @CONTROL_BUS_ALLOCATOR = ControlBusAllocator.new 4096
+      @BUFFER_ALLOCATOR = Allocator.new(num_buffers_for_current_os)
+
+      info_prom = Promise.new
+
+      add_event_oneshot_handler("/sonic-pi/server-info") do |payload|
+        info_prom.deliver! payload
+      end
+      load_synthdefs(synthdef_path)
+      osc @osc_path_s_new, "sonic-pi-server-info", 1, 0, 0, []
+      info = info_prom.get
+      @scsynth_info = SonicPi::Core::SPMap.new({
+        :sample_rate => info[2],
+        :sample_dur => info[3],
+        :radians_per_sample => info[4],
+        :control_rate => info[5],
+        :control_dur => info[6],
+        :subsample_offset => info[7],
+        :num_output_busses => info[8],
+        :num_input_busses => info[9],
+        :num_audio_busses => info[10],
+        :num_control_busses => info[11],
+        :num_buffers => info[12]
+      })
+
+      info "num input busses: #{@scsynth_info[:num_input_busses]}"
+      info "num output busses: #{@scsynth_info[:num_output_busses]}"
+      info "num control busses: #{@scsynth_info[:num_control_busses]}"
+      info "num audio busses: #{@scsynth_info[:num_audio_busses]}"
+      @AUDIO_BUS_ALLOCATOR = AudioBusAllocator.new @scsynth_info[:num_audio_busses], @scsynth_info[:num_output_busses] + @scsynth_info[:num_input_busses]
+      @CONTROL_BUS_ALLOCATOR = ControlBusAllocator.new @scsynth_info[:num_control_busses]
 
       message "info        - Initialising comms... #{msg_queue}" if @debug_mode
+
       clear_scsynth!
-      request_notifications
+    end
 
-
+    def info(s)
+      message "info        - #{s}"
     end
 
     def message(s)
@@ -106,19 +134,19 @@ module SonicPi
     end
 
    def request_notifications
-      message "info        - Requesting notifications" if @debug_mode
+      info "Requesting notifications" if @debug_mode
       osc @osc_path_notify, 1
     end
 
     def load_synthdefs(path)
-      message "info        - Loading synthdefs from path: #{path}" if @debug_mode
-      with_server_sync do
+      info "Loading synthdefs from path: #{path}" if @debug_mode
+      with_done_sync [@osc_path_d_loaddir] do
         osc @osc_path_d_loaddir, path.to_s
       end
     end
 
     def clear_scsynth!
-      message "info        - Clearing scsynth" if @debug_mode
+      info "Clearing scsynth" if @debug_mode
       @CURRENT_NODE_ID.reset!
       clear_schedule
       group_clear 0, true
@@ -221,22 +249,27 @@ module SonicPi
         group.subnode_rm(sn)
       end
 
+      normalised_args = []
+      args_h.each do |k,v|
+        normalised_args << k.to_s << v.to_f
+      end
+
       if now
-        osc @osc_path_s_new, s_name, node_id, pos_code, group_id, *args_h.flatten
+        osc @osc_path_s_new, s_name, node_id, pos_code, group_id, *normalised_args
       else
-        t = Thread.current.thread_variable_get(:sonic_pi_spider_time) || Time.now
+        t = __system_thread_locals.get(:sonic_pi_spider_time) || Time.now
         ts =  t + @sched_ahead_time
         ts = ts - @control_delta if t_minus_delta
-        osc_bundle ts, @osc_path_s_new, s_name, node_id, pos_code, group_id, *args_h.flatten
+        osc_bundle ts, @osc_path_s_new, s_name, node_id, pos_code, group_id, *normalised_args
       end
       sn
     end
 
     def sched_ahead_time_for_node_mod(node_id)
-      thread_local_time = Thread.current.thread_variable_get(:sonic_pi_spider_time)
+      thread_local_time = __system_thread_locals.get(:sonic_pi_spider_time)
 
       if thread_local_time
-        thread_local_deltas = Thread.current.thread_variable_get(:sonic_pi_control_deltas)
+        thread_local_deltas = __system_thread_locals.get(:sonic_pi_local_control_deltas)
         d = thread_local_deltas[node_id] ||= @control_delta
         thread_local_deltas[node_id] += @control_delta
         thread_local_time + d + @sched_ahead_time
@@ -289,33 +322,41 @@ module SonicPi
 
     def buffer_alloc_read(path, start=0, n_frames=0)
       buffer_id = @BUFFER_ALLOCATOR.allocate
-      # TODO do we need to sync these?
-      with_done_sync do
-        osc @osc_path_b_allocread, buffer_id, path, start, n_frames
+      buffer_info(buffer_id) do
+        with_done_sync [@osc_path_b_allocread, buffer_id] do
+          osc @osc_path_b_allocread, buffer_id, path, start, n_frames
+        end
       end
-      buffer_info(buffer_id)
     end
 
     def buffer_alloc(size, n_chans=2)
       buffer_id = @BUFFER_ALLOCATOR.allocate
-      with_done_sync do
-        osc @osc_path_b_alloc, buffer_id, size, n_chans
+      buffer_info(buffer_id) do
+        with_done_sync [@osc_path_b_alloc, buffer_id] do
+          osc @osc_path_b_alloc, buffer_id, size, n_chans
+        end
       end
-      buffer_info(buffer_id)
     end
 
     def buffer_free(buf)
-      with_done_sync do
-        osc @osc_path_b_free, buf.to_i
-      end
-
+      osc @osc_path_b_free, buf.to_i
       @BUFFER_ALLOCATOR.release! buf.to_i
+    end
+
+    def buffer_write(buf, path, extension="wav", sample_format="int16", synchronous=true)
+      path = File.expand_path(path)
+
+      with_done_sync [@osc_path_b_write, buf.to_i] do
+        osc @osc_path_b_write, buf.to_i, path, extension, sample_format, -1, 0, 0
+      end
+      return nil
     end
 
     def buffer_stream_open(path, size=65536, n_chans=2, extension="wav", sample_format="int16", n_frames=-1, start_frame=0, leave_open=1)
       buf = buffer_alloc(size, n_chans)
+      buf.wait_for_allocation
       path = File.expand_path(path)
-      with_done_sync do
+      with_done_sync [@osc_path_b_write, buf.to_i] do
         osc @osc_path_b_write, buf.to_i, path, extension, sample_format, n_frames, start_frame, leave_open
       end
 
@@ -323,13 +364,14 @@ module SonicPi
     end
 
     def buffer_stream_close(buf_stream)
-      with_done_sync do
-        osc @osc_path_b_close, buf_stream.to_i
+      id = buf_stream.to_i
+      with_done_sync [@osc_path_b_close, id] do
+        osc @osc_path_b_close, id
       end
       buffer_free buf_stream
     end
 
-    def buffer_info(id)
+    def buffer_info(id, &blk)
       prom = Promise.new
       @osc_events.add_handler(@osc_path_b_info, @osc_events.gensym("/sonicpi/server")) do |payload|
         p = payload.to_a
@@ -339,21 +381,43 @@ module SonicPi
           :remove_handler
         end
       end
-      osc @osc_path_b_query, id
+
+      if blk
+        Thread.new do
+          blk.call
+          osc @osc_path_b_query, id
+        end
+      else
+        osc @osc_path_b_query, id
+      end
       LazyBuffer.new(self, id, prom)
     end
 
-    def with_done_sync(&block)
-      with_server_sync do
-        prom = Promise.new
-        @osc_events.add_handler(@osc_path_done, @osc_events.gensym("/sonicpi/server")) do |pl|
+    def with_done_sync(matchers, &block)
+      prom = Promise.new
+      @osc_events.add_handler(@osc_path_done, @osc_events.gensym("/sonicpi/server")) do |pl|
+        matched = true
+
+        begin
+          pla = pl.to_a
+          matchers.each_with_index do |m, idx|
+            if m != pla[idx]
+              matched = false
+              break
+            end
+          end
+        rescue Exception => e
+          matched = false
+          info "with_done_sync exception:\n#{e.message}\n#{e.backtrace.inspect}\n\n"
+        end
+        if matched
           prom.deliver! true
           :remove_handler
         end
-        res = block.yield
-        prom.get
-        res
       end
+      res = block.yield
+      prom.get(5)
+      res
     end
 
     def with_server_sync(&block)

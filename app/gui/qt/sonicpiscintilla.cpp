@@ -12,21 +12,29 @@
 //++
 
 #include "sonicpiscintilla.h"
+#include "oscsender.h"
 
 #include <QSettings>
 #include <QShortcut>
-
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <Qsci/qscicommandset.h>
 #include <Qsci/qscilexer.h>
+#include <QCheckBox>
 
-SonicPiScintilla::SonicPiScintilla(SonicPiLexer *lexer, SonicPiTheme *theme)
+SonicPiScintilla::SonicPiScintilla(SonicPiLexer *lexer, SonicPiTheme *theme, QString fileName, OscSender *oscSender, QCheckBox *autoIndent)
   : QsciScintilla()
 {
+  setAcceptDrops(true);
   this->theme = theme;
+  this->oscSender = oscSender;
+  this->fileName = fileName;
+  this->autoIndent = autoIndent;
   standardCommands()->clearKeys();
   standardCommands()->clearAlternateKeys();
   QString skey;
-  QSettings settings("sonic-pi.net", "Default Key bindings");
+  QSettings settings("sonic-pi.net", "gui-key-bindings");
 
 #if defined(Q_OS_MAC)
   int SPi_CTRL = Qt::META;
@@ -127,7 +135,7 @@ SonicPiScintilla::SonicPiScintilla(SonicPiLexer *lexer, SonicPiTheme *theme)
 
   setMarginsBackgroundColor(theme->color("MarginBackground"));
   setMarginsForegroundColor(theme->color("MarginForeground"));
-  setMarginsFont(QFont("Menlo", 15, -1, true));
+  setMarginsFont(QFont("Hack", 15, -1, true));
   setUtf8(true);
   setText("# Loading previous buffer contents. Please wait...");
   setLexer((QsciLexer *)lexer);
@@ -486,4 +494,72 @@ void SonicPiScintilla::replaceBuffer(QString content, int line, int index, int f
   setCursorPosition(line, index);
   setFirstVisibleLine(first_line);
   endUndoAction();
+}
+
+void SonicPiScintilla::completeListOrNewlineAndIndent(){
+  if(isListActive()) {
+    tabCompleteifList();
+  }
+  else {
+    if(this->autoIndent->isChecked()) {
+      newlineAndIndent();
+    } else {
+      newLine();
+    }
+  }
+}
+
+void SonicPiScintilla::newlineAndIndent() {
+  int point_line, point_index, first_line;
+  getCursorPosition(&point_line, &point_index);
+  first_line = firstVisibleLine();
+
+  std::string code = text().toStdString();
+
+  // TODO: fix this:
+  std::string id = "foobar";
+
+  oscSender->bufferNewlineAndIndent(point_line, point_index, first_line, code, fileName.toStdString(), id);
+}
+
+void SonicPiScintilla::dragEnterEvent(QDragEnterEvent *event)
+{
+  if (event->mimeData()->hasFormat("text/uri-list")) {
+    event->acceptProposedAction();
+  }
+}
+
+void SonicPiScintilla::dragMoveEvent(QDragMoveEvent *event)
+{
+  if (event->mimeData()->hasFormat("text/uri-list")) {
+    event->acceptProposedAction();
+  }
+}
+
+bool SonicPiScintilla::event(QEvent *evt)
+{
+
+  if (evt->type()==QEvent::KeyPress) {
+    QKeyEvent* key = static_cast<QKeyEvent*>(evt);
+    if (key->key() == Qt::Key_Return) {
+      completeListOrNewlineAndIndent();
+      return true;
+    }
+  }
+
+  return QsciScintilla::event(evt);
+}
+
+
+void SonicPiScintilla::dropEvent(QDropEvent *dropEvent)
+{
+  if (dropEvent->mimeData()->hasFormat("text/uri-list")) {
+    dropEvent->acceptProposedAction();
+    QList<QUrl> urlList = dropEvent->mimeData()->urls();
+    QString text;
+    for (int i = 0; i < urlList.size(); ++i) {
+      text += "\"" + urlList.at(i).path() + "\"" + QLatin1Char('\n');
+    }
+    insert(text);
+  }
 }

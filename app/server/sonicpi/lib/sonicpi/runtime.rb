@@ -88,18 +88,18 @@ module SonicPi
     end
 
     def __gui_heartbeat(id)
-      t = Time.now
+      t = Time.now.freeze
       @gui_heartbeats[id] = t
       @gui_last_heartbeat = t
     end
 
     def __extract_git_hash
       head_path = root_path + "/.git/HEAD"
-      if File.exists? head_path
+      if File.exist? head_path
         ref = File.readlines(head_path).first
         ref_path = root_path + "/.git/" + ref[5..-1]
         ref_path = ref_path.strip
-        if File.exists? ref_path
+        if File.exist? ref_path
           return File.readlines(ref_path).first
         end
       end
@@ -179,28 +179,17 @@ module SonicPi
       __info "--- IMPORTANT NOTICE ---\n\n   Your version of Sonic Pi is outdated\n   The latest is #{v}\n   Please consider updating:\n\n   http://sonic-pi.net\n\n", 1
     end
 
-
-    def __no_kill_block(t = Thread.current, &block)
-      return block.call if t.thread_variable_get(:sonic_pi__not_inherited__spider_in_no_kill_block)
-      t.thread_variable_get(:sonic_pi_spider_no_kill_mutex).synchronize do
-        t.thread_variable_set(:sonic_pi__not_inherited__spider_in_no_kill_block, true)
-        r = block.call
-        t.thread_variable_set(:sonic_pi__not_inherited__spider_in_no_kill_block, false)
-        r
-      end
-    end
-
     def __info(s, style=0)
-      @msg_queue.push({:type => :info, :style => style, :val => s.to_s})
+      @msg_queue.push({:type => :info, :style => style, :val => s.to_s}) unless __system_thread_locals.get :sonic_pi_spider_silent
     end
 
     def __multi_message(m)
-      @msg_queue.push({:type => :multi_message, :val => m, :jobid => __current_job_id, :jobinfo => __current_job_info, :runtime => __current_local_run_time.round(4), :thread_name => __current_thread_name})
+      @msg_queue.push({:type => :multi_message, :val => m, :jobid => __current_job_id, :jobinfo => __current_job_info, :runtime => __current_local_run_time.round(4), :thread_name => __current_thread_name}) unless __system_thread_locals.get :sonic_pi_spider_silent
     end
 
     def __delayed(&block)
       raise "Can only use __delayed in a job thread" unless __current_job_id
-      delayed_blocks = Thread.current.thread_variable_get :sonic_pi_spider_delayed_blocks
+      delayed_blocks = __system_thread_locals.get :sonic_pi_local_spider_delayed_blocks
       delayed_blocks << block
     end
 
@@ -234,55 +223,47 @@ module SonicPi
     end
 
     def __schedule_delayed_blocks_and_messages!
-      delayed_messages = Thread.current.thread_variable_get :sonic_pi_spider_delayed_messages
-      delayed_blocks = Thread.current.thread_variable_get(:sonic_pi_spider_delayed_blocks) || []
-      unless(delayed_messages.empty?)
-        last_vt = Thread.current.thread_variable_get :sonic_pi_spider_time
-        parent_t = Thread.current
-        job_id = parent_t.thread_variable_get(:sonic_pi_spider_job_id)
+      delayed_messages = __system_thread_locals.get :sonic_pi_local_spider_delayed_messages
+      delayed_blocks = __system_thread_locals.get(:sonic_pi_local_spider_delayed_blocks) || []
+      if delayed_messages
+          unless(delayed_messages.empty?)
+            last_vt = __system_thread_locals.get :sonic_pi_spider_time
+            parent_t = Thread.current
+            job_id = __system_thread_locals(parent_t).get(:sonic_pi_spider_job_id)
+            new_system_tls = SonicPi::Core::ThreadLocal.new(__system_thread_locals)
 
-        t = Thread.new do
+            t = Thread.new do
+              __system_thread_locals_reset!(new_system_tls)
+              Thread.current.priority = -10
 
-          Thread.current.thread_variable_set(:sonic_pi_thread_group, :send_delayed_messages)
-          Thread.current.priority = -10
-          #only copy the necessary thread locals from parent
-          Thread.current.thread_variable_set(:sonic_pi_spider_job_id, job_id)
-          Thread.current.thread_variable_set(:sonic_pi_spider_job_info, parent_t.thread_variable_get(:sonic_pi_spider_job_info))
-          Thread.current.thread_variable_set(:sonic_pi_spider_time, last_vt)
-          Thread.current.thread_variable_set(:sonic_pi_spider_start_time, parent_t.thread_variable_get(:sonic_pi_spider_start_time))
-          Thread.current.thread_variable_set(:sonic_pi_spider_users_thread_name, parent_t.thread_variable_get(:sonic_pi_spider_users_thread_name))
-          Thread.current.thread_variable_set :sonic_pi_spider_subthread_mutex, Mutex.new
-          Thread.current.thread_variable_set :sonic_pi_spider_no_kill_mutex, Mutex.new
+              # Calculate the amount of time to sleep to sync us up with the
+              # sched_ahead_time
+              sched_ahead_sync_t = last_vt + @mod_sound_studio.sched_ahead_time
+              sleep_time = sched_ahead_sync_t - Time.now
+              Kernel.sleep(sleep_time) if sleep_time > 0
+              #We're now in sync with the sched_ahead time
 
-          Thread.current.thread_variable_set(:sonic_pi_core_thread_local_counters, {})
-          # Calculate the amount of time to sleep to sync us up with the
-          # sched_ahead_time
-          sched_ahead_sync_t = last_vt + @mod_sound_studio.sched_ahead_time
-          sleep_time = sched_ahead_sync_t - Time.now
-          Kernel.sleep(sleep_time) if sleep_time > 0
-          #We're now in sync with the sched_ahead time
+              delayed_blocks.each do |b|
+                begin
+                  b.call
+                rescue => e
+                  log e.backtrace
+                end
+              end
 
-          delayed_blocks.each do |b|
-            begin
-              b.call
-            rescue => e
-              log e.backtrace
+              __multi_message(delayed_messages)
+              job_subthread_rm(job_id, Thread.current)
             end
+
+            job_subthread_add(job_id, t)
+            __system_thread_locals.set_local :sonic_pi_local_spider_delayed_messages, []
           end
-
-          __multi_message(delayed_messages)
-          job_subthread_rm(job_id, Thread.current)
         end
-
-        job_subthread_add(job_id, t)
-
-        Thread.current.thread_variable_set :sonic_pi_spider_delayed_messages, []
-      end
     end
 
     def __enqueue_multi_message(m_type, m)
       raise "Can only use __enqueue_multi_message in a job thread" unless __current_job_id
-      delayed_messages = Thread.current.thread_variable_get :sonic_pi_spider_delayed_messages
+      delayed_messages = __system_thread_locals.get :sonic_pi_local_spider_delayed_messages
       delayed_messages << [m_type, m]
     end
 
@@ -307,13 +288,14 @@ module SonicPi
       line = __extract_line_of_error(e)
       err_msg = e.message
       info = __current_job_info
-      err_msg.gsub!(/for #<SonicPiSpiderUser[a-z0-9:]+>/, '')
+      err_msg.gsub(/for #<SonicPiSpiderUser[a-z0-9:]+>/, '')
       res = ""
       if line != -1
 
         # TODO: Remove this hack when we have projects
         w = info[:workspace]
-        w = "buffer " + w[10..-1]
+        w = normalise_buffer_name(w)
+        w = "buffer " + w
         # TODO: end of hack
 
         res = res + "[#{w}, line #{line}]"
@@ -326,23 +308,27 @@ module SonicPi
     end
 
     def __current_run_time
-      Thread.current.thread_variable_get(:sonic_pi_spider_time) - @global_start_time
+      __system_thread_locals.get(:sonic_pi_spider_time) - @global_start_time
     end
 
     def __current_local_run_time
-      Thread.current.thread_variable_get(:sonic_pi_spider_time) - Thread.current.thread_variable_get(:sonic_pi_spider_start_time)
+      __system_thread_locals.get(:sonic_pi_spider_time) - __system_thread_locals.get(:sonic_pi_spider_start_time)
+    end
+
+    def __current_sched_at_time
+      __system_thread_locals.get(:sonic_pi_spider_time) + @mod_sound_studio.sched_ahead_time
     end
 
     def __current_thread_name
-      Thread.current.thread_variable_get :sonic_pi_spider_users_thread_name || ""
+      __system_thread_locals.get(:sonic_pi_local_spider_users_thread_name) || ""
     end
 
     def __current_job_id
-      Thread.current.thread_variable_get :sonic_pi_spider_job_id
+      __system_thread_locals.get :sonic_pi_spider_job_id
     end
 
     def __current_job_info
-      Thread.current.thread_variable_get :sonic_pi_spider_job_info || {}
+      __system_thread_locals.get(:sonic_pi_spider_job_info) || {}
     end
 
     def __sync_msg_command(msg)
@@ -374,15 +360,18 @@ module SonicPi
       @events.event("/sync", {:id => id, :result => res})
     end
 
+    def __events
+      @events
+    end
+
     def __stop_job(j)
-      __info "Stopping job #{j}"
+      __info "Stopping run #{j}"
       # Only allow a job to be stopped once
       @@stop_job_mutex.synchronize do
         if @user_jobs.running?(j)
           job_subthreads_kill(j)
-          @user_jobs.kill_job j
           @life_hooks.killed(j)
-          @life_hooks.exit(j)
+          @user_jobs.kill_job j
           @msg_queue.push({type: :job, jobid: j, action: :killed})
         end
       end
@@ -405,7 +394,9 @@ module SonicPi
     end
 
     def __join_subthreads(t)
-      subthreads = t.thread_variable_get :sonic_pi_spider_subthreads
+      subthreads = __system_thread_locals(t).get :sonic_pi_local_spider_subthreads
+
+
       subthreads.each do |st|
         st.join
         __join_subthreads(st)
@@ -417,7 +408,7 @@ module SonicPi
       raise "Aborting load: file name is blank" if  id.empty?
       path = project_path + id + '.spi'
       s = "# Welcome to Sonic Pi #{@version.to_s}\n\n"
-      if File.exists? path
+      if File.exist? path
         s = IO.read(path)
       end
       __replace_buffer(id, s)
@@ -427,6 +418,18 @@ module SonicPi
       id = id.to_s
       content = content.to_s
       @msg_queue.push({type: "replace-buffer", buffer_id: id, val: content, line: 0, index: 0, first_line: 0})
+    end
+
+    def __replace_buffer_idx(idx, content)
+      idx = idx.to_i
+      content = content.to_s
+      @msg_queue.push({type: "replace-buffer-idx", buffer_idx: idx, val: content, line: 0, index: 0, first_line: 0})
+    end
+
+    def __run_buffer_idx(idx)
+      idx = idx.to_i
+      content = content.to_s
+      @msg_queue.push({type: "run-buffer-idx", buffer_idx: idx})
     end
 
     def __add_completion(k, text, point_line_offset=0, point=0)
@@ -695,54 +698,64 @@ module SonicPi
       #__error(Exception.new(output.join("\n")))
     end
 
+    def __set_default_user_thread_locals!
+      __thread_locals.set :sonic_pi_spider_arg_bpm_scaling, true
+      __thread_locals.set :sonic_pi_spider_sleep_mul, 1.0
+      __thread_locals.set :sonic_pi_spider_new_thread_random_gen_idx, 0
+    end
+
     def __spider_eval(code, info={})
       id = @job_counter.next
+
+      silent = info.fetch(:silent, false)
 
       # skip __nosave lines for error reporting
       firstline = 1
       firstline -= code.lines.to_a.take_while{|l| l.include? "#__nosave__"}.count
       start_t_prom = Promise.new
       info[:workspace] = 'eval' unless info[:workspace]
+      info[:workspace].freeze
+      info.freeze
       job = Thread.new do
         Thread.current.priority = 20
         begin
 
+
           num_running_jobs = reg_job(id, Thread.current)
-          Thread.current.thread_variable_set :sonic_pi_spider_thread, true
-          Thread.current.thread_variable_set :sonic_pi_thread_group, "job-#{id}"
-          Thread.current.thread_variable_set :sonic_pi_spider_arg_bpm_scaling, true
-          Thread.current.thread_variable_set :sonic_pi_spider_sleep_mul, 1.0
-          Thread.current.thread_variable_set :sonic_pi_spider_job_id, id
-          Thread.current.thread_variable_set :sonic_pi_spider_job_info, info
-          Thread.current.thread_variable_set :sonic_pi_spider_subthreads, Set.new
-          Thread.current.thread_variable_set :sonic_pi_control_deltas, {}
-          Thread.current.thread_variable_set :sonic_pi_spider_subthread_mutex, Mutex.new
-          Thread.current.thread_variable_set :sonic_pi_spider_no_kill_mutex, Mutex.new
-          Thread.current.thread_variable_set :sonic_pi_spider_delayed_blocks, []
-          Thread.current.thread_variable_set :sonic_pi_spider_delayed_messages, []
-          Thread.current.thread_variable_set :sonic_pi_spider_random_gen_seed, 0
-          Thread.current.thread_variable_set :sonic_pi_spider_random_gen_idx, 0
-          Thread.current.thread_variable_set :sonic_pi_spider_new_thread_random_gen_idx, 0
+          __system_thread_locals.set_local :sonic_pi_local_thread_group, "job-#{id}"
+
+          __system_thread_locals.set_local :sonic_pi_local_spider_subthread_mutex, Mutex.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_no_kill_mutex, Mutex.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_subthreads, Set.new
+          __system_thread_locals.set_local :sonic_pi_local_spider_delayed_blocks, []
+          __system_thread_locals.set_local :sonic_pi_local_spider_delayed_messages, []
+          __system_thread_locals.set :sonic_pi_spider_job_id, id
+          __system_thread_locals.set :sonic_pi_spider_silent, silent
+
+          __system_thread_locals.set :sonic_pi_spider_job_info, info
+          __system_thread_locals.set :sonic_pi_spider_thread, true
+          __set_default_user_thread_locals!
           @msg_queue.push({type: :job, jobid: id, action: :start, jobinfo: info})
           @life_hooks.init(id, {:thread => Thread.current})
-          now = Time.now
+          now = Time.now.freeze
           start_t_prom.deliver! now
-          Thread.current.thread_variable_set :sonic_pi_spider_time, now
-          Thread.current.thread_variable_set :sonic_pi_spider_start_time, now
-          Thread.current.thread_variable_set :sonic_pi_spider_beat, 0
+          __system_thread_locals.set :sonic_pi_spider_time, now
+          __system_thread_locals.set :sonic_pi_spider_start_time, now
+          __system_thread_locals.set :sonic_pi_spider_beat, 0
           if num_running_jobs == 1
             @global_start_time = now
             # Force a GC collection before we start making music!
             GC.start
           end
-          __info "Starting run #{id}"
+          __info "Starting run #{id}" unless silent
           code = PreParser.preparse(code)
-
+          code = "in_thread seed: 0 do\n" + code + "\nend"
+          firstline -=1
           eval(code, nil, info[:workspace], firstline)
           __schedule_delayed_blocks_and_messages!
         rescue Stop => e
           __no_kill_block do
-            __info("Stopping Run #{id}")
+            __info("Stopping Run #{id}") unless silent
           end
         rescue SyntaxError => e
           __no_kill_block do
@@ -753,11 +766,12 @@ module SonicPi
 
               # TODO: Remove this hack when we have projects
               w = info[:workspace]
-              w = "buffer " + w[10..-1]
+              w = normalise_buffer_name(w)
+              w = "buffer #{w}"
               # TODO: end of hack
 
               err_msg = "[#{w}, line #{line}] \n #{message}"
-              error_line = code.lines.to_a[line] ||  ""
+              error_line = code.lines.to_a[line - firstline] ||  ""
             else
               line = -1
               err_msg = "\n #{e.message}"
@@ -767,7 +781,9 @@ module SonicPi
             __info("Syntax error in run #{id}. Code ignored.")
           end
         rescue Exception => e
+          __schedule_delayed_blocks_and_messages!
           __no_kill_block do
+            __info("Aborted Run #{id}")
             __error(e)
             @msg_queue.push({type: :job, jobid: id, action: :completed, jobinfo: info})
           end
@@ -777,21 +793,26 @@ module SonicPi
 
       Thread.new do
         Thread.current.priority = -10
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, "job-#{id}-GC")
+        __system_thread_locals.set_local(:sonic_pi_local_thread_group, "job-#{id}-GC")
         job.join
         __join_subthreads(job)
 
-
         # wait until all synths are dead
-
         @life_hooks.completed(id)
         start_t = start_t_prom.get
         @life_hooks.exit(id, {:start_t => start_t})
         deregister_job_and_return_subthreads(id)
         @user_jobs.job_completed(id)
         Kernel.sleep @mod_sound_studio.sched_ahead_time
-        __info "Completed run #{id}"
+        __info "Completed run #{id}" unless silent
+        unless @user_jobs.any_jobs_running?
+          __info "All runs completed" unless silent
+          @msg_queue.push({type: :all_jobs_completed})
+          @life_hooks.all_completed(silent)
+        end
+
         @msg_queue.push({type: :job, jobid: id, action: :completed, jobinfo: info})
+
       end
     end
 
@@ -805,7 +826,29 @@ module SonicPi
     end
 
     def __describe_threads
-      __info "n-threads: #{Thread.list.size}, names: #{Thread.list.map{|t| t.thread_variable_get(:sonic_pi_thread_group)}}"
+      names = Thread.list.map{|t| __system_thread_locals(t).get(:sonic_pi_local_thread_group)}
+      __info "n-threads: #{Thread.list.size}, names: #{names}, s: #{names.size}"
+    end
+
+    def __current_tracker
+      tracker = __system_thread_locals.get(:sonic_pi_local_tracker)
+      if tracker
+        return tracker
+      else
+        tracker = SynthTracker.new
+        __system_thread_locals.set_local(:sonic_pi_local_tracker, tracker)
+        return tracker
+      end
+    end
+
+    def __current_subthreads(t = Thread.current)
+      subthreads = __system_thread_locals(t).get(:sonic_pi_local_spider_subthreads)
+      if subthreads
+        return subthreads
+      else
+        subthreads = Set.new
+        subthreads = __system_thread_locals(t).set_local(:sonic_pi_local_spider_subthreads, subthreads)
+      end
     end
 
     private
@@ -840,7 +883,7 @@ module SonicPi
           # register this name with the corresponding job id and also
           # store it in a thread local
           @named_subthreads[name] = SThread.new(name, job_id, t)
-          t.thread_variable_set :sonic_pi__not_inherited__spider_subthread_name, name
+          __system_thread_locals(t).set_local :sonic_pi_local_spider_subthread_name, name
         end
       end
 
@@ -859,7 +902,7 @@ module SonicPi
     def job_subthread_rm_unmutexed(job_id, t)
       threads = @job_subthreads[job_id]
       threads.delete(t) if threads
-      subthread_name = t.thread_variable_get(:sonic_pi__not_inherited__spider_subthread_name)
+      subthread_name = __system_thread_locals(t).get(:sonic_pi_local_spider_subthread_name)
       @named_subthreads.delete(subthread_name) if subthread_name
     end
 
@@ -922,6 +965,35 @@ module SonicPi
       RBeautify.beautify_string :ruby, source
     end
 
+    def normalise_buffer_name(name)
+      norm = case name
+             when "workspace_zero"
+               "0"
+             when "workspace_one"
+               "1"
+             when "workspace_two"
+               "2"
+             when "workspace_three"
+               "3"
+             when "workspace_four"
+               "4"
+             when "workspace_five"
+               "5"
+             when "workspace_six"
+               "6"
+             when "workspace_seven"
+               "7"
+             when "workspace_eight"
+               "8"
+             when "workspace_nine"
+               "9"
+             else
+               name
+             end
+      return norm
+    end
+
+
 
   end
 
@@ -932,11 +1004,11 @@ module SonicPi
     include ActiveSupport
     include RuntimeMethods
 
-    def initialize(hostname, port, msg_queue, max_concurrent_synths, user_methods)
+    def initialize(hostname, ports, msg_queue, user_methods)
       @git_hash = __extract_git_hash
       gh_short = @git_hash ? "-#{@git_hash[0, 5]}" : ""
       @settings = Config::Settings.new(user_settings_path)
-      @version = Version.new(2, 11, 0, "dev#{gh_short}")
+      @version = Version.new(2, 12, 0, "midi-alpha1")
       @server_version = __server_version
       @life_hooks = LifeCycleHooks.new
       @msg_queue = msg_queue
@@ -944,7 +1016,7 @@ module SonicPi
       @keypress_handlers = {}
       @events = IncomingEvents.new
       @sync_counter = Counter.new
-      @job_counter = Counter.new
+      @job_counter = Counter.new(-1) # Start counting jobs from 0
       @job_subthreads = {}
       @job_main_threads = {}
       @named_subthreads = {}
@@ -952,9 +1024,27 @@ module SonicPi
       @user_jobs = Jobs.new
       @sync_real_sleep_time = 0.05
       @user_methods = user_methods
-      @global_start_time = 0
+      @global_start_time = Time.now
       @session_id = SecureRandom.uuid
       @snippets = {}
+      @osc_cues_port = ports[:osc_cues_port]
+      # TODO remove hardcoded port number
+      @osc_router_port = 8014
+      @log_cues = true
+      @log_cues_file = File.open(osc_cues_log_path, 'a')
+      # TODO Add support for TCP
+      @osc_server = SonicPi::OSC::UDPServer.new(ports[:osc_cues_port], open: true) do |address, args|
+        @events.async_event("/spider_thread_sync/#{address}", {
+                              :time => Time.now.freeze,
+                              :cue_splat_map_or_arr => args.freeze,
+                              :cue => address })
+
+        if @log_cues
+          @log_cues_file.write("[#{Time.now.strftime("%Y-%m-%d %H:%M:%S")}] #{address}, #{args.inspect}\n")
+          @log_cues_file.flush
+        end
+      end
+
 
       @gui_heartbeats = {}
       @gui_last_heartbeat = nil
@@ -963,11 +1053,10 @@ module SonicPi
       rescue
         @gitsave = nil
       end
-
       @save_queue = SizedQueue.new(20)
 
       @event_t = Thread.new do
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, :event_loop)
+        __system_thread_locals.set_local(:sonic_pi_local_thread_group, :event_loop)
         loop do
           event = @event_queue.pop
           __handle_event event
@@ -975,7 +1064,7 @@ module SonicPi
       end
 
       @save_t = Thread.new do
-        Thread.current.thread_variable_set(:sonic_pi_thread_group, :save_loop)
+        __system_thread_locals.set_local(:sonic_pi_local_thread_group, :save_loop)
         loop do
           event = @save_queue.pop
           id, content = *event
@@ -992,14 +1081,10 @@ module SonicPi
           end
         end
       end
-      __info "Welcome to Sonic Pi", 1
-      __info "Session #{@session_id[0..7]}"
-      date = Time.now
-      __info "#{date.strftime("%A")} #{date.day.ordinalize} #{date.strftime("%B, %Y")}"
-      __info "%02d:%02d, %s" % [date.hour, date.min, date.zone]
-
+      __info "Welcome to Sonic Pi #{version}", 1
+      __info "Running on Ruby #{RUBY_VERSION}"
       __info [
-"Hello, somewhere in the world
+"Somewhere in the world
    the sun is shining
    for you right now.",
 "Hello, it's lovely to see
@@ -1008,7 +1093,23 @@ module SonicPi
 "Turn your head towards the sun
    and the shadows
    will fall
-   behind you."].sample, 1
+   behind you.",
+"Remember, with live coding music
+   there are no mistakes
+   only opportunities to learn
+   and improve.",
+"The only secret to mastering
+   live coding is practice.
+   Lots and lots of practice.",
+"When you share
+   your work and ideas
+   freely with others
+   the whole world benefits." ].sample, 1
+      date = Time.now.freeze
+      time = "%02d:%02d, %s" % [date.hour, date.min, date.zone]
+      __info "#{date.strftime("%A")} #{date.day.ordinalize} #{date.strftime("%B, %Y")}, #{time}"
+
+
 
       msg = @settings.get(:message) || ""
       msg = msg.strip
@@ -1026,7 +1127,7 @@ module SonicPi
 
       log "Unable to initialise git repo at #{project_path}" unless @gitsave
 
-      __info "#{@version} Ready..."
+      __info "Let the Live Coding begin..."
 
     end
 

@@ -38,12 +38,14 @@ FileUtils.mkdir_p native_dir
 # Rugged is used for storing the user's ruby music scripts in Git
 # FFI is used for MIDI lib support
 native_ext_dirs = [
-  File.expand_path(File.dirname(__FILE__) + '/../vendor/rugged-0.23.3/ext/rugged'),
-  File.expand_path(File.dirname(__FILE__) + '/../vendor/ffi-1.9.10/ext/ffi_c'),
+  File.expand_path(File.dirname(__FILE__) + '/../vendor/rugged-0.25.1/ext/rugged'),
+  File.expand_path(File.dirname(__FILE__) + '/../vendor/ffi-1.9.17/ext/ffi_c'),
   File.expand_path(File.dirname(__FILE__) + '/../vendor/atomic/ext'),
   File.expand_path(File.dirname(__FILE__) + '/../vendor/ruby-prof-0.15.8/ext/ruby_prof/'),
 
   File.expand_path(File.dirname(__FILE__) + '/../vendor/interception/ext/'),
+
+  File.expand_path(File.dirname(__FILE__) + '/../vendor/fast_osc-0.0.11/ext/fast_osc'),
 
   [File.expand_path(File.dirname(__FILE__) + '/../vendor/did_you_mean-0.10.0/ext/did_you_mean'), "did_you_mean"]
 ]
@@ -51,9 +53,8 @@ native_ext_dirs = [
 if os == :osx
   native_ext_dirs += [
     File.expand_path(File.dirname(__FILE__) + '/../vendor/narray-0.6.1.1/'),
-    File.expand_path(File.dirname(__FILE__) + '/../vendor/ruby-coreaudio-0.0.11/ext/')]
+    File.expand_path(File.dirname(__FILE__) + '/../vendor/ruby-coreaudio-0.0.12/ext/coreaudio/')]
 end
-
 
 native_ext_dirs.each do |ext_dir|
   if ext_dir.is_a? Array

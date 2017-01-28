@@ -1,4 +1,4 @@
-1#--
+#--
 # This file is part of Sonic Pi: http://sonic-pi.net
 # Full project source: https://github.com/samaaron/sonic-pi
 # License: https://github.com/samaaron/sonic-pi/blob/master/LICENSE.md
@@ -23,9 +23,9 @@ module SonicPi
     @@current_uuid = nil
     @@home_dir = nil
     @@util_lock = Mutex.new
-    @@raspberry_pi_1 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exists?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2708`).empty?
-    @@raspberry_pi_2 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exists?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2709`).empty? && (`cat /proc/cpuinfo | grep crc32`).empty?
-    @@raspberry_pi_3 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exists?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2709`).empty? && !(`cat /proc/cpuinfo | grep crc32`).empty?
+    @@raspberry_pi_1 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exist?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2708`).empty?
+    @@raspberry_pi_2 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exist?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2709`).empty? && (`cat /proc/cpuinfo | grep crc32`).empty?
+    @@raspberry_pi_3 = RUBY_PLATFORM.match(/.*arm.*-linux.*/) && File.exist?('/proc/cpuinfo') && !(`cat /proc/cpuinfo | grep BCM2709`).empty? && !(`cat /proc/cpuinfo | grep crc32`).empty?
 
     @@home_dir = File.expand_path((ENV['SONIC_PI_HOME'] || Dir.home) + '/.sonic-pi/')
     @@project_path = @@home_dir + '/store/default/'
@@ -34,7 +34,7 @@ module SonicPi
     [@@home_dir, @@project_path, @@log_path].each do |dir|
 
       begin
-        FileUtils.mkdir_p(dir) unless File.exists?(dir)
+        FileUtils.mkdir_p(dir) unless File.exist?(dir)
       rescue
         @@safe_mode = true
         STDERR.puts "Unable to create #{dir} due to permissions errors"
@@ -49,9 +49,17 @@ module SonicPi
       @@log_file = nil
     end
 
+    begin
+      @@process_log_file = File.open("#{@@log_path}/processes.log", 'a')
+    rescue
+      @@safe_mode = true
+      STDERR.puts "Unable to open process log file #{@@log_path}/processes.log"
+      @@process_log_file = nil
+    end
 
     at_exit do
       @@log_file.close if @@log_file
+      @@process_log_file.close if @@process_log_file
     end
 
     def os
@@ -87,6 +95,10 @@ module SonicPi
 
     def unify_tilde_dir(path)
       path.gsub(/\A#{@@tilde_dir}/, "~")
+    end
+
+    def num_buffers_for_current_os
+      4096
     end
 
     def num_audio_busses_for_current_os
@@ -161,7 +173,7 @@ module SonicPi
         return @@current_uuid if @@current_uuid
         path = home_dir + '/.uuid'
 
-        if (File.exists? path)
+        if (File.exist? path)
           old_id = File.readlines(path).first.strip
           if  (not old_id.empty?) &&
               (old_id.size == 36)
@@ -185,19 +197,11 @@ module SonicPi
 
     def ensure_dir(d)
       begin
-        FileUtils.mkdir_p(dir) unless File.exists?(dir)
+        FileUtils.mkdir_p(dir) unless File.exist?(dir)
       rescue
         @@safe_mode = true
         log "Unable to create #{dir} due to permissions errors"
       end
-    end
-
-    def linux_fhs?
-      # use FHS directory scheme:
-      # check if Sonic Pi's ruby server is not running inside the
-      # user's home directory, but is installed in /usr/lib/sonic-pi
-      # on Linux from a distribution's package
-      File.dirname(__FILE__).start_with?("/usr/lib/sonic-pi")
     end
 
     def root_path
@@ -209,15 +213,11 @@ module SonicPi
     end
 
     def snippets_path
-      linux_fhs? ?
-        File.absolute_path("/usr/share/sonic-pi/snippets") :
-        File.absolute_path("#{etc_path}/snippets")
+      File.absolute_path("#{etc_path}/snippets")
     end
 
     def doc_path
-      linux_fhs? ?
-        File.absolute_path("/usr/share/doc/sonic-pi") :
-        File.absolute_path("#{etc_path}/doc")
+      File.absolute_path("#{etc_path}/doc")
     end
 
     def cheatsheets_path
@@ -229,27 +229,19 @@ module SonicPi
     end
 
     def tmp_path
-      linux_fhs? ?
-        File.absolute_path("/tmp") :
-        File.absolute_path("#{root_path}/tmp")
+      File.absolute_path("#{root_path}/tmp")
     end
 
     def synthdef_path
-      linux_fhs? ?
-        File.absolute_path("/usr/share/sonic-pi/synthdefs/compiled") :
-        File.absolute_path("#{etc_path}/synthdefs/compiled")
+      File.absolute_path("#{etc_path}/synthdefs/compiled")
     end
 
     def samples_path
-      linux_fhs? ?
-        File.absolute_path("/usr/share/sonic-pi/samples") :
-        File.absolute_path("#{etc_path}/samples")
+      File.absolute_path("#{etc_path}/samples")
     end
 
     def buffers_path
-      linux_fhs? ?
-        File.absolute_path("/usr/share/sonic-pi/buffers") :
-        File.absolute_path("#{etc_path}/buffers")
+      File.absolute_path("#{etc_path}/buffers")
     end
 
     def app_path
@@ -257,7 +249,7 @@ module SonicPi
     end
 
     def html_public_path
-      File.absolute_path("#{app_path}/gui/html")
+      File.absolute_path("#{app_path}/gui/html/resources/public")
     end
 
     def qt_gui_path
@@ -272,22 +264,73 @@ module SonicPi
       File.absolute_path("#{app_path}/server")
     end
 
+    def server_bin_path
+      File.absolute_path("#{server_path}/bin")
+    end
+
     def native_path
-      File.absolute_path("#{server_path}/native/#{os}")
+      if os == :windows
+        File.absolute_path("#{server_path}/native/win")
+      else
+        File.absolute_path("#{server_path}/native/#{os}")
+      end
+    end
+
+    def osmid_o2m_path
+      File.join(native_path, "osmid", "o2m")
+    end
+
+    def osmid_m2o_path
+      File.join(native_path, "osmid", "m2o")
     end
 
     def scsynth_log_path
       log_path + '/scsynth.log'
     end
 
+    def erlang_log_path
+      log_path + '/erlang.log'
+    end
+
+    def osc_cues_log_path
+      log_path + '/osc_cues.log'
+    end
+
+    def osmid_m2o_log_path
+      log_path + '/osmid_m2o.log'
+    end
+
+    def osmid_o2m_log_path
+      log_path + '/osmid_o2m.log'
+    end
+
     def ruby_path
-      # For running tests
       case os
       when :windows
-        File.join(native_path, "bin", "ruby.exe")
-      when :osx, :raspberry, :linux
+        File.join(native_path, "ruby", "bin", "ruby.exe")
+      when :osx
         File.join(native_path, "ruby", "bin", "ruby")
+      when  :raspberry, :linux
+        "ruby"
       end
+    end
+
+    def erlang_boot_path
+      case os
+      when :windows
+        raise "Please implement me!"
+      when :osx
+        erlang_bin_path = File.join(native_path, "erlang", "erl")
+        "\"#{ruby_path}\" \"#{erlang_bin_path}\""
+        # Uncomment this if you want to use the system Erlang:
+        #"erl"
+      when :raspberry, :linux
+        "erl"
+      end
+    end
+
+    def erlang_server_path
+      File.join(server_path, "erlang")
     end
 
     def user_settings_path
@@ -305,7 +348,7 @@ module SonicPi
 
     def log_exception(e, context="")
       if debug_mode
-        res = "Exception => #{context} #{e.message}"
+        res = String.new("Exception => #{context} #{e.message}")
         e.backtrace.each do |b|
           res << "                                        "
           res << b
@@ -321,7 +364,8 @@ module SonicPi
 
     def log(message)
       if debug_mode
-        res = ""
+        message = String.new(message.to_s)
+        res = String.new
         res << "\n" if message.empty?
         first = true
         while !(message.empty?)
@@ -339,23 +383,31 @@ module SonicPi
       end
     end
 
+    def log_process_info(s)
+      puts s
+      if @@process_log_file
+        @@process_log_file.puts s
+        @@process_log_file.flush
+      end
+    end
+
     def debug_mode
-      true
+      false
     end
 
     def osc_debug_mode
-      true
+      false
     end
 
     def incoming_osc_debug_mode
-      true
+      false
     end
 
     def resolve_synth_opts_hash_or_array(opts)
       case opts
-      when Hash
+      when Hash, SonicPi::Core::SPMap
         return opts
-      when Array
+      when Array, SonicPi::Core::SPVector
         merge_synth_arg_maps_array(opts)
       when NilClass
         return {}
@@ -364,7 +416,31 @@ module SonicPi
       end
     end
 
+    def truthy?(val)
+
+        case val
+        when Numeric
+          return val != 0
+        when NilClass
+          return false
+        when TrueClass
+          return true
+        when FalseClass
+          return false
+        when Proc
+          new_v = val.call
+          return truthy?(new_v)
+        end
+    end
+
+
     def merge_synth_arg_maps_array(opts_a)
+      return opts_a if opts_a.is_a? Hash
+
+      # merge all initial hash elements
+      # assumes rest of args are kv pairs and turns
+      # them into hashes too and merges the
+      opts_a = opts_a.to_a
       res = {}
       idx = 0
       size = opts_a.size
@@ -378,7 +454,7 @@ module SonicPi
       left = (opts_a[idx..-1])
       raise "There must be an even number of trailing synth args" unless left.size.even?
       h = Hash[*left]
-      res.merge()
+      res.merge(h)
     end
 
     def purge_nil_vals!(m)
@@ -390,7 +466,7 @@ module SonicPi
       arg_h.each do |k, v|
         if v
           rounded = v.is_a?(Float) ? v.round(4) : v.inspect
-          s << "#{k}: #{rounded}, "
+          s += "#{k}: #{rounded}, "
         end
       end
       s.chomp(", ") << "}"
@@ -398,6 +474,55 @@ module SonicPi
 
     def safe_mode?
       @@safe_mode
+    end
+
+    def is_list_like?(o)
+      o.is_a?(Array) || o.is_a?(SonicPi::Core::SPVector)
+    end
+
+    def register_process(pid)
+      `'#{ruby_path}' '#{server_path}/bin/task-register.rb' '#{pid}'`
+    end
+
+    def kill_and_deregister_process(pid)
+      `'#{ruby_path}' '#{server_path}/bin/task-clear.rb' '#{pid}'`
+    end
+
+    def __thread_locals(t = Thread.current)
+      tls = t.thread_variable_get(:sonic_pi_thread_locals)
+      tls = t.thread_variable_set(:sonic_pi_thread_locals, SonicPi::Core::ThreadLocal.new) unless tls
+      return tls
+    end
+
+    def __system_thread_locals(t = Thread.current)
+      tls = t.thread_variable_get(:sonic_pi_system_thread_locals)
+      tls = t.thread_variable_set(:sonic_pi_system_thread_locals, SonicPi::Core::ThreadLocal.new) unless tls
+      return tls
+    end
+
+    def __thread_locals_reset!(tls, t = Thread.current)
+      t.thread_variable_set(:sonic_pi_thread_locals, tls)
+    end
+
+    def __system_thread_locals_reset!(tls, t = Thread.current)
+      t.thread_variable_set(:sonic_pi_system_thread_locals, tls)
+    end
+
+    def __no_kill_block(t = Thread.current, &block)
+      mut = __system_thread_locals(t).get(:sonic_pi_local_spider_no_kill_mutex)
+
+      # just call block when in a non-sonic-pi-thread
+      return block.call unless mut
+
+      # if we're already in a no_kill_block, run code anyway
+      return block.call if __system_thread_locals(t).get(:sonic_pi_local_spider_in_no_kill_block)
+
+      mut.synchronize do
+        __system_thread_locals(t).set_local(:sonic_pi_local_spider_in_no_kill_block, true)
+        r = block.call
+        __system_thread_locals(t).set_local(:sonic_pi_local_spider_in_no_kill_block, false)
+        r
+      end
     end
   end
 end

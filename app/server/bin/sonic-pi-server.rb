@@ -15,6 +15,7 @@
 require 'cgi'
 require 'rbconfig'
 
+
 require_relative "../core.rb"
 require_relative "../sonicpi/lib/sonicpi/studio"
 
@@ -23,18 +24,17 @@ require_relative "../sonicpi/lib/sonicpi/util"
 require_relative "../sonicpi/lib/sonicpi/osc/osc"
 require_relative "../sonicpi/lib/sonicpi/lang/core"
 require_relative "../sonicpi/lib/sonicpi/lang/minecraftpi"
+require_relative "../sonicpi/lib/sonicpi/lang/midi"
 require_relative "../sonicpi/lib/sonicpi/lang/sound"
 #require_relative "../sonicpi/lib/sonicpi/lang/pattern"
 require_relative "../sonicpi/lib/sonicpi/runtime"
 
 require 'multi_json'
+require 'memoist'
 
-puts "Sonic Pi server booting..."
+STDOUT.puts "Sonic Pi server booting..."
 
 include SonicPi::Util
-
-server_port = ARGV[1] ? ARGV[0].to_i : 4557
-client_port = ARGV[2] ? ARGV[1].to_i : 4558
 
 protocol = case ARGV[0]
            when "-t"
@@ -42,13 +42,84 @@ protocol = case ARGV[0]
            else
              :udp
            end
+STDOUT.puts "Using protocol: #{protocol}"
+STDOUT.puts "Detecting port numbers..."
 
-puts "Using protocol: #{protocol}"
+server_port = ARGV[1] ? ARGV[1].to_i : 4557
+client_port = ARGV[2] ? ARGV[2].to_i : 4558
+scsynth_port = ARGV[3] ? ARGV[3].to_i : 4556
+scsynth_send_port = ARGV[4] ? ARGV[4].to_i : 4556
+osc_cues_port = ARGV[5] ? ARGV[5].to_i : 4559
+erlang_port = ARGV[6] ? ARGV[6].to_i : 4560
+osc_midi_port = ARGV[7] ? ARGV[6].to_i : 4561
 
-if protocol == :tcp
-  gui = SonicPi::OSC::TCPClient.new("127.0.0.1", client_port, use_encoder_cache: true)
-else
-  gui = SonicPi::OSC::UDPClient.new("127.0.0.1", client_port, use_encoder_cache: true)
+check_port = lambda do |port, gui|
+  begin
+    s = SonicPi::OSC::UDPServer.new(port)
+    s.stop
+    STDOUT.puts "  - OK"
+  rescue Exception => e
+    begin
+      STDOUT.puts "Port #{port} unavailable. Perhaps Sonic Pi is already running?"
+      STDOUT.flush
+      gui.send("/exited-with-boot-error", "Port unavailable: " + port.to_s + ", is scsynth already running?")
+    rescue Errno::EPIPE => e
+      STDOUT.puts "GUI not listening, exit anyway."
+    end
+    exit
+  end
+end
+
+
+STDOUT.puts "Send port: #{client_port}"
+
+begin
+  if protocol == :tcp
+    gui = SonicPi::OSC::TCPClient.new("127.0.0.1", client_port, use_encoder_cache: true)
+  else
+    gui = SonicPi::OSC::UDPClient.new("127.0.0.1", client_port, use_encoder_cache: true)
+  end
+rescue Exception => e
+  STDOUT.puts "Exception when opening socket to talk to GUI!"
+  STDOUT.puts e.message
+  STDOUT.puts e.backtrace.inspect
+  STDOUT.puts e.backtrace
+end
+
+
+STDOUT.puts "Listen port: #{server_port}"
+check_port.call(server_port, gui)
+STDOUT.puts "Scsynth port: #{scsynth_port}"
+check_port.call(scsynth_port, gui)
+STDOUT.puts "Scsynth send port: #{scsynth_send_port}"
+check_port.call(scsynth_send_port, gui)
+STDOUT.puts "OSC cues port: #{osc_cues_port}"
+check_port.call(osc_cues_port, gui)
+STDOUT.puts "Erlang port: #{erlang_port}"
+check_port.call(erlang_port, gui)
+
+STDOUT.flush
+
+sonic_pi_ports = {
+  server_port: server_port,
+  scsynth_port: scsynth_port,
+  scsynth_send_port: scsynth_send_port,
+  osc_cues_port: osc_cues_port,
+  osc_midi_port: osc_midi_port,
+  erlang_port: erlang_port }
+
+# Start Erlang
+begin
+
+  erlang_cmd = "#{erlang_boot_path} -pz \"#{erlang_server_path}\" -s pi_server start"
+  STDOUT.puts erlang_cmd
+  pid = spawn erlang_cmd, out: erlang_log_path, err: erlang_log_path
+  register_process(pid)
+rescue Exception => e
+  STDOUT.puts "Exception when starting Erlang"
+  STDOUT.puts e.message
+  STDOUT.puts e.backtrace.inspect
+  STDOUT.puts e.backtrace
 end
 
 begin
@@ -59,13 +130,13 @@ begin
   end
 rescue Exception => e
   begin
-    STDERR.puts "Received Exception!"
-    STDERR.puts e.message
-    STDERR.puts e.backtrace.inspect
-    STDERR.puts e.backtrace
+    STDOUT.puts "Exception when opening a socket to listen from GUI!"
+    STDOUT.puts e.message
+    STDOUT.puts e.backtrace.inspect
+    STDOUT.puts e.backtrace
     gui.send("/exited-with-boot-error", "Failed to open server port " + server_port.to_s + ", is scsynth already running?")
   rescue Errno::EPIPE => e
-    STDERR.puts "GUI not listening, exit anyway."
+    STDOUT.puts "GUI not listening, exit anyway."
   end
   exit
 end
@@ -77,7 +148,7 @@ at_exit do
     STDOUT.puts "Shutting down GUI..."
     gui.send("/exited")
   rescue Errno::EPIPE => e
-    STDERR.puts "GUI not listening."
+    STDOUT.puts "GUI not listening."
   end
   STDOUT.puts "Goodbye :-)"
 end
@@ -90,17 +161,30 @@ klass.send(:include, user_methods)
 klass.send(:include, SonicPi::Lang::Core)
 klass.send(:include, SonicPi::Lang::Sound)
 klass.send(:include, SonicPi::Lang::Minecraft)
+klass.send(:include, SonicPi::Lang::Midi)
+klass.send(:extend, Memoist)
+
+# This will pick up all memoizable fns in all modules as they share the
+# same docsystem.
+# TODO think of a better way to modularise this stuff when we move to
+# using namespaces...
+
+SonicPi::Lang::Core.memoizable_fns.each do |f|
+  klass.send(:memoize, f)
+end
+
+
 klass.send(:define_method, :inspect) { "Runtime" }
 #klass.send(:include, SonicPi::Lang::Pattern)
 
 ws_out = Queue.new
 
 begin
-  sp =  klass.new "localhost", 4556, ws_out, 5, user_methods
+  sp =  klass.new "127.0.0.1", sonic_pi_ports, ws_out, user_methods
 
   # read in init.rb if exists
   if File.exists?(init_path)
-    sp.__spider_eval(File.read(init_path))
+    sp.__spider_eval(File.read(init_path), silent: true)
   else
     begin
     File.open(init_path, "w") do |f|
@@ -114,22 +198,22 @@ begin
   end
 
 rescue Exception => e
-  STDERR.puts "Failed to start server: " + e.message
-  STDERR.puts e.backtrace.join("\n")
+  STDOUT.puts "Failed to start server: " + e.message
+  STDOUT.puts e.backtrace.join("\n")
   gui.send("/exited-with-boot-error", "Server Exception:\n #{e.message}")
   exit
 end
 
 osc_server.add_method("/run-code") do |args|
   gui_id = args[0]
-  code = args[1]
+  code = args[1].force_encoding("utf-8")
   sp.__spider_eval code
 end
 
 osc_server.add_method("/save-and-run-buffer") do |args|
   gui_id = args[0]
   buffer_id = args[1]
-  code = args[2]
+  code = args[2].force_encoding("utf-8")
   workspace = args[3]
   sp.__save_buffer(buffer_id, code)
   sp.__spider_eval code, {workspace: workspace}
@@ -138,7 +222,7 @@ end
 osc_server.add_method("/save-buffer") do |args|
   gui_id = args[0]
   buffer_id = args[1]
-  code = args[2]
+  code = args[2].force_encoding("utf-8")
   sp.__save_buffer(buffer_id, code)
 end
 
@@ -160,7 +244,7 @@ end
 osc_server.add_method("/buffer-newline-and-indent") do |args|
   gui_id = args[0]
   id = args[1]
-  buf = args[2]
+  buf = args[2].force_encoding("utf-8")
   point_line = args[3]
   point_index = args[4]
   first_line = args[5]
@@ -170,7 +254,7 @@ end
 osc_server.add_method("/buffer-section-complete-snippet-or-indent-selection") do |args|
   gui_id = args[0]
   id = args[1]
-  buf = args[2]
+  buf = args[2].force_encoding("utf-8")
   start_line = args[3]
   finish_line = args[4]
   point_line = args[5]
@@ -181,7 +265,7 @@ end
 osc_server.add_method("/buffer-indent-selection") do |args|
   gui_id = args[0]
   id = args[1]
-  buf = args[2]
+  buf = args[2].force_encoding("utf-8")
   start_line = args[3]
   finish_line = args[4]
   point_line = args[5]
@@ -192,7 +276,7 @@ end
 osc_server.add_method("/buffer-section-toggle-comment") do |args|
   gui_id = args[0]
   id = args[1]
-  buf = args[2]
+  buf = args[2].force_encoding("utf-8")
   start_line = args[3]
   finish_line = args[4]
   point_line = args[5]
@@ -203,7 +287,7 @@ end
 osc_server.add_method("/buffer-beautify") do |args|
   gui_id = args[0]
   id = args[1]
-  buf = args[2]
+  buf = args[2].force_encoding("utf-8")
   line = args[3]
   index = args[4]
   first_line = args[5]
@@ -288,6 +372,13 @@ osc_server.add_method("/mixer-lpf-disable") do |args|
   sp.set_mixer_lpf_disable!
 end
 
+osc_server.add_method("/mixer-amp") do |args|
+  gui_id = args[0]
+  amp = args[1]
+  silent = args[2] == 1
+  sp.set_volume!(amp, true, silent)
+end
+
 osc_server.add_method("/enable-update-checking") do |args|
   gui_id = args[0]
   sp.__enable_update_checker
@@ -329,15 +420,15 @@ out_t = Thread.new do
         begin
           gui.send("/exited")
         rescue Errno::EPIPE => e
-          STDERR.puts "GUI not listening, exit anyway."
+          STDOUT.puts "GUI not listening, exit anyway."
         end
         continue = false
       else
         case message[:type]
         when :multi_message
-          gui.send("/multi_message", message[:jobid], message[:thread_name].to_s, message[:runtime].to_s, message[:val].size, *message[:val].flatten)
+          gui.send("/log/multi_message", message[:jobid], message[:thread_name].to_s, message[:runtime].to_s, message[:val].size, *message[:val].flatten)
         when :info
-          gui.send("/info", message[:style] || 0, message[:val] || "")
+          gui.send("/log/info", message[:style] || 0, message[:val] || "")
         when :syntax_error
           desc = message[:val] || ""
           line = message[:line] || -1
@@ -360,7 +451,19 @@ out_t = Thread.new do
           index = message[:index] || 0
           first_line = message[:first_line] || 0
           #          puts "replacing buffer #{buf_id}, #{content}"
-          gui.send("/replace-buffer", buf_id, content, line, index, first_line)
+          gui.send("/buffer/replace", buf_id, content, line, index, first_line)
+        when "replace-buffer-idx"
+          buf_idx = message[:buffer_idx] || 0
+          content = message[:val] || "Internal error within a fn calling replace-buffer-idx without a :val payload"
+          line = message[:line] || 0
+          index = message[:index] || 0
+          first_line = message[:first_line] || 0
+          #          puts "replacing buffer #{buf_id}, #{content}"
+          gui.send("/buffer/replace-idx", buf_idx, content, line, index, first_line)
+        when "run-buffer-idx"
+          buf_idx = message[:buffer_idx] || 0
+          #          puts "running buffer #{buf_idx}"
+          gui.send("/buffer/run-idx", buf_idx)
         when "replace-lines"
           buf_id = message[:buffer_id]
           content = message[:val] || "Internal error within a fn calling replace-line without a :val payload"
@@ -369,7 +472,7 @@ out_t = Thread.new do
           start_line = message[:start_line] || point_line
           finish_line = message[:finish_line] || start_line
           #          puts "replacing line #{buf_id}, #{content}"
-          gui.send("/replace-lines", buf_id, content, start_line, finish_line, point_line, point_index)
+          gui.send("/buffer/replace-lines", buf_id, content, start_line, finish_line, point_line, point_index)
         when :version
           v = message[:version]
           v_num = message[:version_num]
@@ -378,19 +481,21 @@ out_t = Thread.new do
           lc = message[:last_checked]
           plat = host_platform_desc
           gui.send("/version", v.to_s, v_num.to_i, lv.to_s, lv_num.to_i, lc.day, lc.month, lc.year, plat.to_s)
+        when :all_jobs_completed
+          gui.send("/runs/all-completed")
         when :job
           id = message[:job_id]
           action = message[:action]
           # do nothing for now
         else
-          STDERR.puts "ignoring #{message}"
+          STDOUT.puts "ignoring #{message}"
         end
 
       end
     rescue Exception => e
-      STDERR.puts "Exception!"
-      STDERR.puts e.message
-      STDERR.puts e.backtrace.inspect
+      STDOUT.puts "Exception!"
+      STDOUT.puts e.message
+      STDOUT.puts e.backtrace.inspect
     end
   end
 end

@@ -11,10 +11,12 @@
 # notice is included.
 #++
 require_relative "../version"
+require_relative "../util"
 
 module SonicPi
   module Synths
     class BaseInfo
+      include Util
       attr_reader :scsynth_name, :info
 
       def initialize
@@ -36,6 +38,28 @@ module SonicPi
         arg_info
       end
 
+      def munge_opts(studio, args_h)
+        # This is an opportunity to modify the args_h prior to synth trigger
+        # Result of this method will be the new args_h
+        args_h
+      end
+
+      def on_start(studio, args_h)
+        # do nothing
+
+        # This will be called immediately prior to the synth
+        # launching.  args_h will have been mostly normalised at this
+        # stage.  (prior to a conversion to an array and all values
+        # being converted to floats via .to_f)
+      end
+
+      def on_finish(studio, args_h)
+        # do nothing
+
+        # This will be called immediately after the synth has completed.
+        # Execution will happen in its own independent thread.
+      end
+
       def rrand(min, max)
         range = (min - max).abs
         r = rand(range.to_f)
@@ -51,9 +75,7 @@ module SonicPi
         args_h
       end
 
-      def munge_opts(args_h)
-        args_h
-      end
+
 
       def doc
         "Please write documentation!"
@@ -146,6 +168,16 @@ module SonicPi
         @cached_bpm_scale_args = args_to_scale
       end
 
+      def buffer_args
+        return @cached_buffer_args if @cached_buffer_args
+
+        buffer_args = []
+        @info.each do |k, v|
+          buffer_args << k if v[:buffer]
+        end
+        @cached_buffer_args = buffer_args
+      end
+
       def midi_args
         return @cached_midi_args if @cached_midi_args
 
@@ -222,6 +254,33 @@ module SonicPi
 
       private
 
+      def v_buffer_like(arg)
+        l = lambda do |args|
+          a = args[arg]
+          a &&
+            (
+            # straight up buffer
+            a.is_a?(Buffer)  ||
+
+            # string or symbol representing the
+            # buffers name
+            a.is_a?(String)  ||
+            a.is_a?(Symbol)  ||
+
+            # vector description of buffer consisting of two
+            # arguments, name and size:
+            # [:foo, 3]
+            # (A buffer called foo of duration 3)
+            (
+              is_list_like?(a) &&
+              a.size == 2 &&
+              (a[0].is_a?(Symbol) || a[0].is_a?(String)) &&
+              a[1].is_a?(Numeric)
+              ))
+        end
+        [l, "must be a buffer description. Such as a buffer, :foo, \"foo\", or [:foo, 4]"]
+      end
+
       def v_sum_less_than_oet(arg1, arg2, max)
         [lambda{|args| (args[arg1] + args[arg2]) <= max}, "added to #{arg2.to_sym} must be less than or equal to #{max}"]
       end
@@ -268,20 +327,6 @@ module SonicPi
 
       def default_arg_info
         {
-          :mix =>
-          {
-            :doc => "The amount (percentage) of FX present in the resulting sound represented as a value between 0 and 1. For example, a mix of 0 means that only the original sound is heard, a mix of 1 means that only the FX is heard (typically the default) and a mix of 0.5 means that half the original and half of the FX is heard.",
-            :validations => [v_between_inclusive(:mix, 0, 1)],
-            :modulatable => true
-          },
-
-          :mix_slide =>
-          {
-            :doc => "Amount of time (in beats) for the mix value to change. A long slide value means that the mix takes a long time to slide from the previous value to the new value. A slide of 0 means that the mix instantly changes to the new value.",
-            :validations => [v_positive(:mix_slide)],
-            :modulatable => true
-          },
-
           :note =>
           {
             :doc => "Note to play. Either a MIDI number or a symbol representing a note. For example: `30`, `52`, `:C`, `:C2`, `:Eb4`, or `:Ds3`",
@@ -555,6 +600,131 @@ module SonicPi
         true
       end
     end
+
+    class SoundIn < SonicPiSynth
+      def name
+        "Sound In"
+      end
+
+      def introduced
+        Version.new(2,10,0)
+      end
+
+      def synth_name
+        "sound_in"
+      end
+
+      def doc
+        "Treat sound card input as a synth. If your audio card has inputs, you may use this synth to feed the incoming audio into Sonic Pi. This synth will read in a single mono audio stream - for example from a standard microphone or guitar. See `:sound_in_stereo` for a similar synth capable of reading in a stereo signal.
+
+As with all Sonic Pi synths, there is a default envelope which determines the duration of the lifetime of the synth. Therefore, to get a continuous stream of audio, you need to place consecutive calls to this synth in iteration or a `live_loop`. For example:
+
+```
+live_loop :playback do
+```
+
+```
+   synth :sound_in, sustain: 8
+```
+
+```
+   sleep 8
+```
+
+```
+end
+```
+
+Note that if the microphone and speaker are close together (on a laptop or in a small room) you will potentially get a harsh feedback sound.
+
+Also, note that audio in isn't yet supported on Raspberry Pi."
+      end
+
+      def arg_defaults
+        {
+          :amp => 1,
+          :amp_slide => 0,
+          :amp_slide_shape => 1,
+          :amp_slide_curve => 0,
+          :pan => 0,
+          :pan_slide => 0,
+          :pan_slide_shape => 1,
+          :pan_slide_curve => 0,
+
+          :attack => 0,
+          :decay => 0,
+          :sustain => 1,
+          :release => 0,
+          :attack_level => 1,
+          :decay_level => :sustain_level,
+          :sustain_level => 1,
+          :env_curve => 0,
+
+          :input => 1
+        }
+      end
+
+      def specific_arg_info
+        {
+          :input =>
+          {
+            :doc => "Sound card input channel to obtain audio from. Indexing starts at 1 so input 1 represents the first channel, and channel 2 can be represented by `input: 2`",
+            :validations => [v_greater_than_oet(:input, 1)],
+            :modulatable => true,
+          }
+        }
+      end
+
+    end
+
+    class SoundInStereo < SoundIn
+      def name
+        "Sound In Stereo"
+      end
+
+      def synth_name
+        "sound_in_stereo"
+      end
+
+      def specific_arg_info
+        {
+          :input =>
+          {
+            :doc => "First of two consecutive sound card input channels to obtain audio from. Indexing starts at 1 so input 1 represents the first channel, and channel 2 can be represented by `input: 2`",
+            :validations => [v_greater_than_oet(:input, 1)],
+            :modulatable => true,
+          }
+        }
+      end
+
+      def doc
+        "Treat sound card input as a synth. If your audio card has inputs, you may use this synth to feed the incoming audio into Sonic Pi. This synth will read in a stereo audio stream - for example from a stereo microphone or external stereo keyboard. See `:sound_in` for a similar synth capable of reading in a mono signal. The stereo input is expected to be on consecutive sound card channels.
+
+As with all Sonic Pi synths, there is a default envelope which determines the duration of the lifetime of the synth. Therefore, to get a continuous stream of audio, you need to place consecutive calls to this synth in iteration or a `live_loop`. For example:
+
+```
+live_loop :playback do
+```
+
+```
+   synth :sound_in_stereo, sustain: 8
+```
+
+```
+   sleep 8
+```
+
+```
+end
+```
+
+Note that if the microphone and speaker are close together (on a laptop or in a small room) you will potentially get a harsh feedback sound.
+
+Also, note that audio in isn't yet supported on Raspberry Pi."
+      end
+    end
+
+
 
     class DullBell < SonicPiSynth
       def name
@@ -1957,7 +2127,7 @@ module SonicPi
           :note =>
           {
             :doc => "Note to play. Either a MIDI number or a symbol representing a note. For example: `30`, `52`, `:C`, `:C2`, `:Eb4`, or `:Ds3`. Note that the piano synth can only play whole tones such as 60 and does not handle floats such as 60.3",
-            :validations => [v_positive(:note)],
+            :validations => [v_positive(:note), v_less_than(:note, 231)],
             :modulatable => true
           },
 
@@ -2547,7 +2717,11 @@ module SonicPi
       end
 
       def doc
-        "Dark and swirly, this synth uses Pulse Width Modulation (PWM) to create a timbre which continually moves around. This effect is created using the pulse ugen which produces a variable width square wave. We then control the width of the pulses using a variety of LFOs - sin-osc and lf-tri in this case. We use a number of these LFO modulated pulse ugens with varying LFO type and rate (and phase in some cases) to provide the LFO with a different starting point. We then mix all these pulses together to create a thick sound and then feed it through a resonant low pass filter (rlpf). For extra bass, one of the pulses is an octave lower (half the frequency) and its LFO has a little bit of randomisation thrown into its frequency component for that extra bit of variety."
+        "Dark and swirly, this synth uses Pulse Width Modulation (PWM) to create a timbre which continually moves around. This effect is created using the pulse ugen which produces a variable width square wave. We then control the width of the pulses using a variety of LFOs - sin-osc and lf-tri in this case. We use a number of these LFO modulated pulse ugens with varying LFO type and rate (and phase in some cases) to provide the LFO with a different starting point. We then mix all these pulses together to create a thick sound and then feed it through a resonant low pass filter (rlpf). For extra bass, one of the pulses is an octave lower (half the frequency) and its LFO has a little bit of randomisation thrown into its frequency component for that extra bit of variety.
+
+Synth design adapted from:
+The Prophet Speaks (page 2)
+Steal This Sound,  Mitchell Sigman"
       end
 
       def arg_defaults
@@ -2900,50 +3074,29 @@ module SonicPi
       end
     end
 
-    class StudioInfo < SonicPiSynth
-      def user_facing?
-        false
-      end
-    end
-
-    class SoundIn < StudioInfo
+    class TechSaws < SonicPiSynth
       def name
-        "Sound In"
+        "TechSaws"
       end
 
       def introduced
-        Version.new(2,10,0)
+        Version.new(2,11,0)
       end
 
       def synth_name
-        "sound_in"
+        "tech_saws"
       end
 
       def doc
-        "Treat sound card input as a synth. If your audio card has inputs, you may use this synth to feed the incoming audio into Sonic Pi. This synth will read in a single mono audio stream - for example from a standard microphone or guitar. See `:sound_in_stereo` for a similar synth capable of reading in a stereo signal.
-
-As with all Sonic Pi synths, there is a default envelope which determines the duration of the lifetime of the synth. Therefore, to get a continuous stream of audio, you need to place consecutive calls to this synth in iteration or a `live_loop`. For example:
-
-```
-live_loop :playback do
-```
-
-```
-   synth :sound_in, sustain: 8
-```
-
-```
-   sleep 8
-```
-
-```
-end
-```
-Note that if the microphone and speaker are close together (on a laptop or in a small room) you will potentially get a harsh feedback sound."
+        "Slightly modified supersaw implementation beased on http://sccode.org/1-4YS"
       end
 
       def arg_defaults
         {
+          :note => 52,
+          :note_slide => 0,
+          :note_slide_shape => 1,
+          :note_slide_curve => 0,
           :amp => 1,
           :amp_slide => 0,
           :amp_slide_shape => 1,
@@ -2955,72 +3108,29 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :attack => 0,
           :decay => 0,
-          :sustain => 1,
-          :release => 0,
+          :sustain => 0,
+          :release => 1,
           :attack_level => 1,
           :decay_level => :sustain_level,
           :sustain_level => 1,
-          :env_curve => 0,
+          :env_curve => 2,
 
-          :input => 1
+          :cutoff => 130,
+          :cutoff_slide => 0,
+          :cutoff_slide_shape => 1,
+          :cutoff_slide_curve => 0,
+          :res => 0.7,
+          :res_slide => 0,
+          :res_slide_shape => 1,
+          :res_slide_curve => 0,
+
         }
       end
-
-      def specific_arg_info
-        {
-          :input =>
-          {
-            :doc => "Sound card input channel to obtain audio from. Indexing starts at 1 so input 1 represents the first channel, and channel 2 can be represented by `input: 2`",
-            :validations => [v_greater_than_oet(:input, 1)],
-            :modulatable => true,
-          }
-        }
-      end
-
     end
 
-    class SoundInStereo < SoundIn
-      def name
-        "Sound In Stereo"
-      end
-
-      def synth_name
-        "sound_in_stereo"
-      end
-
-      def specific_arg_info
-        {
-          :input =>
-          {
-            :doc => "First of two consecutive sound card input channels to obtain audio from. Indexing starts at 1 so input 1 represents the first channel, and channel 2 can be represented by `input: 2`",
-            :validations => [v_greater_than_oet(:input, 1)],
-            :modulatable => true,
-          }
-        }
-      end
-
-      def doc
-        "Treat sound card input as a synth. If your audio card has inputs, you may use this synth to feed the incoming audio into Sonic Pi. This synth will read in a stereo audio stream - for example from a stereo microphone or external stereo keyboard. See `:sound_in` for a similar synth capable of reading in a mono signal. The stereo input is expected to be on consecutive sound card channels.
-
-As with all Sonic Pi synths, there is a default envelope which determines the duration of the lifetime of the synth. Therefore, to get a continuous stream of audio, you need to place consecutive calls to this synth in iteration or a `live_loop`. For example:
-
-```
-live_loop :playback do
-```
-
-```
-   synth :sound_in_stereo, sustain: 8
-```
-
-```
-   sleep 8
-```
-
-```
-end
-```
-
-Note that if the microphone and speaker are close together (on a laptop or in a small room) you will potentially get a harsh feedback sound."
+    class StudioInfo < SonicPiSynth
+      def user_facing?
+        false
       end
     end
 
@@ -3042,7 +3152,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
         ""
       end
 
-      def munge_opts(args_h)
+      def munge_opts(studio, args_h)
         alias_opts!(:cutoff, :lpf, args_h)
         alias_opts!(:cutoff_slide, :lpf_slide, args_h)
         alias_opts!(:cutoff_slide_curve, :lpf_slide_curve, args_h)
@@ -3567,7 +3677,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :threshold =>
           {
-            :doc => "Threshold value determining the break point between slope_below and slope_above. Only valid if the compressor is enabled by turning on the comp: opt.",
+            :doc => "Threshold value determining the break point between slope_below and slope_above. Only valid if the compressor is enabled by turning on the compress: opt.",
             :validations => [v_positive(:threshold)],
             :modulatable => true
           },
@@ -3582,7 +3692,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :slope_below =>
           {
-            :doc => "Slope of the amplitude curve below the threshold. A value of 1 means that the output of signals with amplitude below the threshold will be unaffected. Greater values will magnify and smaller values will attenuate the signal. Only valid if the compressor is enabled by turning on the comp: opt.",
+            :doc => "Slope of the amplitude curve below the threshold. A value of 1 means that the output of signals with amplitude below the threshold will be unaffected. Greater values will magnify and smaller values will attenuate the signal. Only valid if the compressor is enabled by turning on the compress: opt.",
             :validations => [],
             :modulatable => true
           },
@@ -3597,7 +3707,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :slope_above =>
           {
-            :doc => "Slope of the amplitude curve above the threshold. A value of 1 means that the output of signals with amplitude above the threshold will be unaffected. Greater values will magnify and smaller values will attenuate the signal. Only valid if the compressor is enabled by turning on the comp: opt.",
+            :doc => "Slope of the amplitude curve above the threshold. A value of 1 means that the output of signals with amplitude above the threshold will be unaffected. Greater values will magnify and smaller values will attenuate the signal. Only valid if the compressor is enabled by turning on the compress: opt.",
 
             :validations => [],
             :modulatable => true
@@ -3613,7 +3723,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :clamp_time =>
           {
-            :doc => "Time taken for the amplitude adjustments to kick in fully (in seconds). This is usually pretty small (not much more than 10 milliseconds). Also known as the time of the attack phase. Only valid if the compressor is enabled by turning on the comp: opt.",
+            :doc => "Time taken for the amplitude adjustments to kick in fully (in seconds). This is usually pretty small (not much more than 10 milliseconds). Also known as the time of the attack phase. Only valid if the compressor is enabled by turning on the compress: opt.",
             :validations => [v_positive(:clamp_time)],
             :modulatable => true
           },
@@ -3628,7 +3738,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
 
           :relax_time =>
           {
-            :doc => "Time taken for the amplitude adjustments to be released. Usually a little longer than clamp_time. If both times are too short, you can get some (possibly unwanted) artefacts. Also known as the time of the release phase. Only valid if the compressor is enabled by turning on the comp: opt.",
+            :doc => "Time taken for the amplitude adjustments to be released. Usually a little longer than clamp_time. If both times are too short, you can get some (possibly unwanted) artefacts. Also known as the time of the release phase. Only valid if the compressor is enabled by turning on the compress: opt.",
             :validations => [v_positive(:relax_time)],
             :modulatable => true
           },
@@ -3763,8 +3873,56 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
         "sonic-pi-"
       end
 
+      def arg_defaults
+        { :amp => 1,
+          :amp_slide => 0,
+          :amp_slide_shape => 1,
+          :amp_slide_curve => 0,
+          :mix => 1,
+          :mix_slide => 0,
+          :mix_slide_shape => 1,
+          :mix_slide_curve => 0,
+          :pre_mix => 1,
+          :pre_mix_slide => 0,
+          :pre_mix_slide_shape => 1,
+          :pre_mix_slide_curve => 0,
+          :pre_amp => 1,
+          :pre_amp_slide => 0,
+          :pre_amp_slide_shape => 1,
+          :pre_amp_slide_curve => 0,
+        }
+      end
+
       def default_arg_info
         super.merge({
+                      :mix =>
+                      {
+                        :doc => "The amount (percentage) of FX present in the resulting sound represented as a value between 0 and 1. For example, a mix of 0 means that only the original sound is heard, a mix of 1 means that only the FX is heard (typically the default) and a mix of 0.5 means that half the original and half of the FX is heard.",
+                        :validations => [v_between_inclusive(:mix, 0, 1)],
+                        :modulatable => true
+                      },
+
+                      :mix_slide =>
+                      {
+                        :doc => "Amount of time (in beats) for the mix value to change. A long slide value means that the mix takes a long time to slide from the previous value to the new value. A slide of 0 means that the mix instantly changes to the new value.",
+                        :validations => [v_positive(:mix_slide)],
+                        :modulatable => true
+                      },
+
+                      :pre_mix =>
+                      {
+                        :doc => "The amount (percentage) of the original signal that is fed into the internal FX system as a value between 0 and 1. With a pre_mix: of 0 the FX is completely bypassed unlike a mix: of 0 where the internal FX is still being fed the original signal but the output of the FX is ignored. The difference between the two is subtle but important and is evident when the FX has a residual component such as echo or reverb. When switching mix: from 0 to 1, the residual component of the FX's output from previous audio is present in the output signal. With pre_mix: there is no residual component of the previous audio in the output signal.",
+                        :validations => [v_positive(:pre_mix)],
+                        :modulatable => true
+                      },
+
+                      :pre_mix_slide =>
+                      {
+                        :doc => "Amount of time (in beats) for the pre_mix value to change. A long slide value means that the pre_mix takes a long time to slide from the previous value to the new value. A slide of 0 means that the pre_mix instantly changes to the new value.",
+                        :validations => [v_positive(:pre_mix_slide)],
+                        :modulatable => true
+                      },
+
                       :pre_amp =>
                       {
                         :doc => "Amplification applied to the input signal immediately before it is passed to the FX.",
@@ -3789,13 +3947,512 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
     end
 
+    class FXRecord < FXInfo
+      def name
+        "Record"
+      end
+
+      def introduced
+        Version.new(2,12,0)
+      end
+
+      def synth_name
+        "fx_record"
+      end
+
+      def trigger_with_logical_clock?
+        true
+      end
+
+      def doc
+        "Recorder!"
+      end
+
+      def kill_delay(args_h)
+        0
+      end
+
+      def on_start(studio, args_h)
+        raise "Record FX requires a buffer: opt." unless args_h[:buffer].is_a?(Buffer)
+      end
+
+      def on_finish(studio, args_h)
+        buf = args_h[:buffer]
+        if buf && buf.is_a?(Buffer)
+          Thread.new do
+            # Run this in a thread otherwise it will block the event
+            # system as this method will be called from the event system
+            # thread and therefore shouldn't perform synchronous
+            # blocking event functions such as the with_done_sync in
+            # buffer_alloc triggered by this call to save_buffer!
+            studio.save_buffer!(buf, buf.path)
+          end
+        else
+          raise "Record FX completion handler needs a buffer to save - got #{buf.inspect}, #{buf.class} from #{args_h.inspect}"
+        end
+      end
+
+
+      def arg_defaults
+        { :amp => 1,
+          :amp_slide => 0,
+          :amp_slide_shape => 1,
+          :amp_slide_curve => 0,
+          :mix => 1,
+          :mix_slide => 0,
+          :mix_slide_shape => 1,
+          :mix_slide_curve => 0,
+          :pre_mix => 1,
+          :pre_mix_slide => 0,
+          :pre_mix_slide_shape => 1,
+          :pre_mix_slide_curve => 0,
+          :pre_amp => 1,
+          :pre_amp_slide => 0,
+          :pre_amp_slide_shape => 1,
+          :pre_amp_slide_curve => 0,
+          :buffer => nil
+        }
+      end
+
+      def default_arg_info
+        super.merge({
+                      :buffer =>
+                      {
+                        :doc => "The buffer to record into. Must either be a buffer object, buffer name, list of buffer name and size or the buffer id as a number.",
+                        :validations => [v_buffer_like(:buffer)],
+                        :modulatable => false,
+                        :buffer => true
+                      },
+                    })
+      end
+    end
+
+    class FXSoundOut < FXInfo
+      def name
+        "Sound Out"
+      end
+
+      def introduced
+        Version.new(2,12,0)
+      end
+
+      def synth_name
+        "fx_sound_out"
+      end
+
+      def trigger_with_logical_clock?
+        true
+      end
+
+      def doc
+        "Outputs a mono signal to a soundcard output of your choice."
+      end
+
+      def kill_delay(args_h)
+        0
+      end
+    end
+
+    class FXSoundOutStereo < FXInfo
+      def name
+        "Sound Out Stereo"
+      end
+
+      def introduced
+        Version.new(2,12,0)
+      end
+
+      def synth_name
+        "fx_sound_out_stereo"
+      end
+
+      def trigger_with_logical_clock?
+        true
+      end
+
+      def doc
+        "Outputs a two-channel stereo signal to a soundcard output of your choice."
+      end
+
+      def kill_delay(args_h)
+        0
+      end
+    end
+
+
+    class FXEQ < FXInfo
+
+      def name
+        "EQ"
+      end
+
+      def introduced
+        Version.new(2,12,0)
+      end
+
+      def synth_name
+        "fx_eq"
+      end
+
+      def trigger_with_logical_clock?
+        false
+      end
+
+      def doc
+        "Basic parametric EQ"
+      end
+
+      def arg_defaults
+        super.merge({
+                      :low_shelf => 0,
+                      :low_shelf_slide => 0,
+                      :low_shelf_slide_shape => 1,
+                      :low_shelf_slide_curve => 0,
+                      :low_shelf_note => 43.349957,
+                      :low_shelf_note_slide => 0,
+                      :low_shelf_note_slide_shape => 1,
+                      :low_shelf_note_slide_curve => 0,
+                      :low_shelf_slope => 1,
+                      :low_shelf_slope_slide => 0,
+                      :low_shelf_slope_slide_shape => 1,
+                      :low_shelf_slope_slide_curve => 0,
+
+                      :low => 0,
+                      :low_slide => 0,
+                      :low_slide_shape => 1,
+                      :low_slide_curve => 0,
+                      :low_note => 59.2130948,
+                      :low_note_slide => 0,
+                      :low_note_slide_shape => 1,
+                      :low_note_slide_curve => 0,
+                      :low_q => 0.6,
+                      :low_q_slide => 0,
+                      :low_q_slide_shape => 1,
+                      :low_q_slide_curve => 0,
+
+                      :mid => 0,
+                      :mid_slide => 0,
+                      :mid_slide_shape => 1,
+                      :mid_slide_curve => 0,
+                      :mid_note => 83.2130948,
+                      :mid_note_slide => 0,
+                      :mid_note_slide_shape => 1,
+                      :mid_note_slide_curve => 0,
+                      :mid_q => 0.6,
+                      :mid_q_slide => 0,
+                      :mid_q_slide_shape => 1,
+                      :mid_q_slide_curve => 0,
+
+                      :high => 0,
+                      :high_slide => 0,
+                      :high_slide_shape => 1,
+                      :high_slide_curve => 0,
+                      :high_note => 104.9013539,
+                      :high_note_slide => 0,
+                      :high_note_slide_shape => 1,
+                      :high_note_slide_curve => 0,
+                      :high_q => 0.6,
+                      :high_q_slide => 0,
+                      :high_q_slide_shape => 1,
+                      :high_q_slide_curve => 0,
+
+                      :high_shelf => 0,
+                      :high_shelf_slide => 0,
+                      :high_shelf_slide_shape => 1,
+                      :high_shelf_slide_curve => 0,
+                      :high_shelf_note => 114.2326448,
+                      :high_shelf_note_slide => 0,
+                      :high_shelf_note_slide_shape => 1,
+                      :high_shelf_note_slide_curve => 0,
+                      :high_shelf_slope => 1,
+                      :high_shelf_slope_slide => 0,
+                      :high_shelf_slope_slide_shape => 1,
+                      :high_shelf_slope_slide_curve => 0,
+                    })
+      end
+
+      def specific_arg_info
+        {
+          :low_shelf =>
+          {
+            :doc => "Gain - boost or cut the centre frequency. The low shelf defines the characteristics of the lowest part of the eq FX. A value of 0 will neither boost or cut the low_shelf frequencies. A value of 1 will boost by 15 dB and a value of -1 will cut/attenuate by -15 dB.",
+            :modulatable => true
+          },
+
+          :low_shelf_slide =>
+          {
+            :doc => generic_slide_doc(:low_shelf),
+            :validations => [v_positive(:low_shelf_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :low_shelf_note =>
+          {
+            :doc => "Centre frequency of low shelf in MIDI notes.",
+            :validations => [v_greater_than(:low_shelf_note, 1)],
+            :modulatable => true,
+            :midi => true
+          },
+
+          :low_shelf_note_slide =>
+          {
+            :doc => generic_slide_doc(:low_shelf_note),
+            :validations => [v_positive(:low_shelf_note_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :low_shelf_slope =>
+          {
+            :doc => "Low shelf boost/cut slope. When set to 1 (the default), the shelf slope is as steep as it can be and remain monotonically increasing or decreasing gain with frequency.",
+            :validations => [v_greater_than_oet(:low_shelf_slope, 0), v_less_than_oet(:low_shelf_slope, 1)],
+            :modulatable => true
+          },
+
+          :low_shelf_slope_slide =>
+          {
+            :doc => generic_slide_doc(:low_shelf_slope),
+            :validations => [v_positive(:low_shelf_slope_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+
+          :low =>
+          {
+            :doc => "Gain - boost or cut the centre frequency of the bass part of the sound. The low shelf defines the characteristics of the bass of the eq FX. A value of 0 will neither boost or cut the bass frequencies. A value of 1 will boost by 15 dB and a value of -1 will cut/attenuate by -15 dB.",
+            :modulatable => true
+          },
+
+          :low_slide =>
+          {
+            :doc => generic_slide_doc(:low),
+            :validations => [v_positive(:low_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :low_note =>
+          {
+            :doc => "Centre frequency of the low eq parameter in MIDI notes.",
+            :validations => [v_greater_than(:low_note, 1)],
+            :modulatable => true,
+            :midi => true
+          },
+
+          :low_note_slide =>
+          {
+            :doc => generic_slide_doc(:low_note),
+            :validations => [v_positive(:low_note_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :low_q =>
+          {
+            :doc => "The Q factor for the low eq parameter.
+
+The Q factor controls the width of frequencies that will be affected by the low parameter of this eq FX. A low Q factor gives a wide bandwidth affecting a larger range of frequencies. A high Q factor will give a narrow bandwidth affecting a much smaller range of frequencies.
+
+Here's a list of various Q factors and an approximate corresponding frequency width:
+
+0.7     -> 2 octaves
+1       -> 1 1/3 octaves
+1.4     -> 1 octave
+2.8     -> 1/2 octave
+4.3     -> 1/3 octave
+8.6     -> 1/6 octave
+
+A decent range of Q factors for naturally sounding boosts/cuts is 0.6 to 1.
+",
+            :validations => [v_greater_than_oet(:low_q, 0.001), v_less_than_oet(:low_q, 100)],
+            :modulatable => true
+          },
+
+          :low_q_slide =>
+          {
+            :doc => generic_slide_doc(:low_q),
+            :validations => [v_positive(:low_q_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+
+          :mid =>
+          {
+            :doc => "Gain - boost or cut the centre frequency of the middle part of the sound. The mid shelf defines the characteristics of the bass of the eq FX. A value of 0 will neither boost or cut the bass frequencies. A value of 1 will boost by 15 dB and a value of -1 will cut/attenuate by -15 dB.",
+            :modulatable => true
+          },
+
+          :mid_slide =>
+          {
+            :doc => generic_slide_doc(:mid),
+            :validations => [v_positive(:mid_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :mid_note =>
+          {
+            :doc => "Centre frequency of the mid eq parameter in MIDI notes.",
+            :validations => [v_greater_than(:mid_note, 1)],
+            :modulatable => true,
+            :midi => true
+          },
+
+          :mid_note_slide =>
+          {
+            :doc => generic_slide_doc(:mid_note),
+            :validations => [v_positive(:mid_note_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :mid_q =>
+          {
+            :doc => "The Q factor for the mid eq parameter.
+
+The Q factor controls the width of frequencies that will be affected by the mid parameter of this eq FX. A mid Q factor gives a wide bandwidth affecting a larger range of frequencies. A high Q factor will give a narrow bandwidth affecting a much smaller range of frequencies.
+
+Here's a list of various Q factors and an approximate corresponding frequency width:
+
+0.7     -> 2 octaves
+1       -> 1 1/3 octaves
+1.4     -> 1 octave
+2.8     -> 1/2 octave
+4.3     -> 1/3 octave
+8.6     -> 1/6 octave
+
+A decent range of Q factors for naturally sounding boosts/cuts is 0.6 to 1.
+",
+            :validations => [v_greater_than_oet(:mid_q, 0.001), v_less_than_oet(:mid_q, 100)],
+            :modulatable => true
+          },
+
+          :mid_q_slide =>
+          {
+            :doc => generic_slide_doc(:mid_q),
+            :validations => [v_positive(:mid_q_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+
+                    :high =>
+          {
+            :doc => "Gain - boost or cut the centre frequency of the high part of the sound. The high shelf defines the characteristics of the treble of the eq FX. A value of 0 will neither boost or cut the treble frequencies. A value of 1 will boost by 15 dB and a value of -1 will cut/attenuate by -15 dB.",
+            :modulatable => true
+          },
+
+          :high_slide =>
+          {
+            :doc => generic_slide_doc(:high),
+            :validations => [v_positive(:high_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :high_note =>
+          {
+            :doc => "Centre frequency of the high eq parameter in MIDI notes.",
+            :validations => [v_greater_than(:high_note, 1)],
+            :modulatable => true,
+            :midi => true
+          },
+
+          :high_note_slide =>
+          {
+            :doc => generic_slide_doc(:high_note),
+            :validations => [v_positive(:high_note_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :high_q =>
+          {
+            :doc => "The Q factor for the high eq parameter.
+
+The Q factor controls the width of frequencies that will be affected by the high parameter of this eq FX. A high Q factor gives a wide bandwidth affecting a larger range of frequencies. A high Q factor will give a narrow bandwidth affecting a much smaller range of frequencies.
+
+Here's a list of various Q factors and an approximate corresponding frequency width:
+
+0.7     -> 2 octaves
+1       -> 1 1/3 octaves
+1.4     -> 1 octave
+2.8     -> 1/2 octave
+4.3     -> 1/3 octave
+8.6     -> 1/6 octave
+
+A decent range of Q factors for naturally sounding boosts/cuts is 0.6 to 1.
+",
+            :validations => [v_greater_than_oet(:high_q, 0.001), v_less_than_oet(:high_q, 100)],
+            :modulatable => true
+          },
+
+          :high_q_slide =>
+          {
+            :doc => generic_slide_doc(:high_q),
+            :validations => [v_positive(:high_q_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :high_shelf =>
+          {
+            :doc => "Gain - boost or cut the centre frequency. The high shelf defines the characteristics of the highest part of the eq FX. A value of 0 will neither boost or cut the high_shelf frequencies. A value of 1 will boost by 15 dB and a value of -1 will cut/attenuate by -15 dB.",
+            :modulatable => true
+          },
+
+          :high_shelf_slide =>
+          {
+            :doc => generic_slide_doc(:high_shelf),
+            :validations => [v_positive(:high_shelf_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :high_shelf_note =>
+          {
+            :doc => "Centre frequency of high shelf in MIDI notes.",
+            :validations => [v_greater_than(:high_shelf_note, 1)],
+            :modulatable => true,
+            :midi => true
+          },
+
+          :high_shelf_note_slide =>
+          {
+            :doc => generic_slide_doc(:high_shelf_note),
+            :validations => [v_positive(:high_shelf_note_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :high_shelf_slope =>
+          {
+            :doc => "High shelf boost/cut slope. When set to 1 (the default), the shelf slope is as steep as it can be and remain monotonically increasing or decreasing gain with frequency.",
+            :validations => [v_greater_than_oet(:high_shelf_slope, 0), v_less_than_oet(:high_shelf_slope, 1)],
+            :modulatable => true
+          },
+
+          :high_shelf_slope_slide =>
+          {
+            :doc => generic_slide_doc(:high_shelf_slope),
+            :validations => [v_positive(:high_shelf_slope_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          }
+
+        }
+      end
+    end
+
+
     class FXGVerb < FXInfo
 
       def name
         "GVerb"
       end
-
-
 
       def introduced
         Version.new(2,9,0)
@@ -3814,20 +4471,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 0.4,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-
+        super.merge({
           :spread => 0.5,
           :spread_slide => 0,
           :spread_slide_shape => 1,
@@ -3848,8 +4492,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :release => 3,
           :ref_level => 0.7,
           :tail_level => 0.5
-
-        }
+        })
       end
 
       def kill_delay(args_h)
@@ -3946,20 +4589,8 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
+        super.merge({
           :mix => 0.4,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-
           :room => 0.6,
           :room_slide => 0,
           :room_slide_shape => 1,
@@ -3968,7 +4599,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :damp_slide => 0,
           :damp_slide_shape => 1,
           :damp_slide_curve => 0,
-        }
+        })
       end
 
 
@@ -4033,19 +4664,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :gain => 5,
           :gain_slide => 0,
           :gain_slide_shape => 1,
@@ -4058,7 +4677,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :res_slide => 0,
           :res_slide_shape => 1,
           :res_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -4100,19 +4719,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :sample_rate => 10000,
           :sample_rate_slide => 0,
           :sample_rate_slide_shape => 1,
@@ -4125,7 +4732,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :cutoff_slide => 0,
           :cutoff_slide_shape => 1,
           :cutoff_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -4209,20 +4816,12 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
+        super.merge({
           :pan => 0,
           :pan_slide => 0,
           :pan_slide_shape => 1,
-          :pan_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-        }
+          :pan_slide_curve => 0
+        })
       end
     end
 
@@ -4244,19 +4843,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 0.25,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -4266,7 +4853,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :decay_slide_shape => 1,
           :decay_slide_curve => 0,
           :max_phase => 2
-        }
+        })
       end
 
       def specific_arg_info
@@ -4332,24 +4919,16 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
         "fx_slicer"
       end
 
+      def on_start(studio, args_h)
+        args_h[:rand_buf] = studio.rand_buf_id
+      end
+
       def doc
         "Modulates the amplitude of the input signal with a specific control wave and phase duration. With the default pulse wave, slices the signal in and out, with the triangle wave, fades the signal in and out and with the saw wave, phases the signal in and then dramatically out. Control wave may be inverted with the arg invert_wave for more variety."
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 0.25,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -4390,7 +4969,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :smooth_down_slide => 0,
           :smooth_down_slide_shape => 1,
           :smooth_down_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -4470,10 +5049,6 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
             :modulatable => true,
             :bpm_scale => true
           },
-
-
-
-
 
           :seed =>
           {
@@ -4596,24 +5171,16 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
         "fx_wobble"
       end
 
+      def on_start(studio, args_h)
+        args_h[:rand_buf] = studio.rand_buf_id
+      end
+
       def doc
         "Versatile wobble FX. Will repeatedly modulate a range of filters (rlpf, rhpf) between two cutoff values using a range of control wave forms (saw, pulse, tri, sine). You may alter the phase duration of the wobble, and the resonance of the filter. Combines well with the dsaw synth for crazy dub wobbles. Cutoff value is at cutoff_min at the start of phase"
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 0.5,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -4659,7 +5226,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :smooth_down_slide => 0,
           :smooth_down_slide_shape => 1,
           :smooth_down_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -4849,25 +5416,16 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
         "fx_panslicer"
       end
 
+      def on_start(studio, args_h)
+        args_h[:rand_buf] = studio.rand_buf_id
+      end
+
       def doc
         "Slice the pan automatically from left to right. Behaves similarly to slicer and wobble FX but modifies stereo panning of sound in left and right speakers. Default slice wave form is square (hard slicing between left and right) however other wave forms can be set with the `wave:` opt."
       end
 
       def arg_defaults
-
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 0.25,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -4908,7 +5466,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :smooth_down_slide => 0,
           :smooth_down_slide_shape => 1,
           :smooth_down_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -5116,19 +5674,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 4,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -5146,7 +5692,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :res_slide => 0,
           :res_slide_shape => 1,
           :res_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -5235,16 +5781,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :transpose => 12,
           :transpose_slide => 0,
           :transpose_slide_shape => 1,
@@ -5252,7 +5789,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :max_delay_time => 1,
           :deltime => 0.05,
           :grainsize => 0.075
-        }
+        })
       end
 
       def specific_arg_info
@@ -5310,16 +5847,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :threshold => 0.2,
           :threshold_slide => 0,
           :threshold_slide_shape => 1,
@@ -5340,7 +5868,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :relax_time_slide => 0,
           :relax_time_slide_shape => 1,
           :relax_time_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -5439,18 +5967,10 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :vowel_sound => 1,
           :voice => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -5489,19 +6009,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :super_amp => 1,
           :super_amp_slide => 0,
           :super_amp_slide_shape => 1,
@@ -5514,7 +6022,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :subsub_amp_slide => 0,
           :subsub_amp_slide_shape => 1,
           :subsub_amp_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -5561,19 +6069,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 0.25,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -5583,7 +6079,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :decay_slide_shape => 1,
           :decay_slide_curve => 0,
           :max_phase => 1
-        }
+        })
       end
 
       def specific_arg_info
@@ -5653,28 +6149,16 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
+        super.merge({
           :freq => 30,
           :freq_slide => 0,
           :freq_slide_shape => 1,
           :freq_slide_curve => 0,
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
           :mod_amp => 1,
           :mod_amp_slide => 0,
           :mod_amp_slide_shape => 1,
           :mod_amp_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -5732,19 +6216,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :centre => 100,
           :centre_slide => 0,
           :centre_slide_shape => 1,
@@ -5753,8 +6225,7 @@ Note that if the microphone and speaker are close together (on a laptop or in a 
           :res_slide => 0,
           :res_slide_shape => 1,
           :res_slide_curve => 0
-
-        }
+        })
       end
 
       def specific_arg_info
@@ -5854,7 +6325,45 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
     end
 
-    class FXRLPF < FXInfo
+    class FXLPF < FXInfo
+      def name
+        "Low Pass Filter"
+      end
+
+      def introduced
+        Version.new(2,0,0)
+      end
+
+      def synth_name
+        "fx_lpf"
+      end
+
+
+
+      def doc
+        "Dampens the parts of the signal that are higher than the cutoff point (typically the crunchy fizzy harmonic overtones) and keeps the lower parts (typically the bass/mid of the sound). Choose a higher cutoff to keep more of the high frequencies/treble of the sound and a lower cutoff to make the sound more dull and only keep the bass."
+      end
+
+
+
+      def arg_defaults
+        super.merge({
+          :cutoff => 100,
+          :cutoff_slide => 0,
+          :cutoff_slide_shape => 1,
+          :cutoff_slide_curve => 0,
+        })
+      end
+
+      def specific_arg_info
+        {
+
+
+        }
+      end
+    end
+
+    class FXRLPF < FXLPF
       def name
         "Resonant Low Pass Filter"
       end
@@ -5868,19 +6377,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :cutoff => 100,
           :cutoff_slide => 0,
           :cutoff_slide_shape => 1,
@@ -5889,7 +6386,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
           :res_slide => 0,
           :res_slide_shape => 1,
           :res_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -5902,7 +6399,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       def doc
         "Dampens the parts of the signal that are higher than the cutoff point (typically the crunchy fizzy harmonic overtones) and keeps the lower parts (typically the bass/mid of the sound). The resonant part of the resonant low pass filter emphasises/resonates the frequencies around the cutoff point. The amount of emphasis is controlled by the res opt with a higher res resulting in greater resonance. High amounts of resonance (rq ~1) can create a whistling sound around the cutoff frequency.
 
-  Choose a higher cutoff to keep more of the high frequences/treble of the sound and a lower cutoff to make the sound more dull and only keep the bass."
+  Choose a higher cutoff to keep more of the high frequencies/treble of the sound and a lower cutoff to make the sound more dull and only keep the bass."
       end
     end
 
@@ -5920,7 +6417,34 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
     end
 
-    class FXRHPF < FXInfo
+    class FXHPF < FXInfo
+      def name
+        "High Pass Filter"
+      end
+
+      def introduced
+        Version.new(2,0,0)
+      end
+
+      def synth_name
+        "fx_hpf"
+      end
+
+      def doc
+        "Dampens the parts of the signal that are lower than the cutoff point (typically the bass of the sound) and keeps the higher parts (typically the crunchy fizzy harmonic overtones). Choose a lower cutoff to keep more of the bass/mid and a higher cutoff to make the sound more light and crispy."
+      end
+
+      def arg_defaults
+        super.merge({
+          :cutoff => 100,
+          :cutoff_slide => 0,
+          :cutoff_slide_shape => 1,
+          :cutoff_slide_curve => 0
+        })
+      end
+    end
+
+    class FXRHPF < FXHPF
       def name
         "Resonant High Pass Filter"
       end
@@ -5940,19 +6464,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :cutoff => 100,
           :cutoff_slide => 0,
           :cutoff_slide_shape => 1,
@@ -5960,8 +6472,8 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
           :res => 0.5,
           :res_slide => 0,
           :res_slide_shape => 1,
-          :res_slide_curve => 0,
-        }
+          :res_slide_curve => 0
+        })
       end
 
       def specific_arg_info
@@ -6006,19 +6518,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :freq => 100,
           :freq_slide => 0,
           :freq_slide_shape => 1,
@@ -6031,7 +6531,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
           :db_slide => 0,
           :db_slide_shape => 1,
           :db_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -6087,56 +6587,6 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
 
     end
 
-    class FXLPF < FXInfo
-      def name
-        "Low Pass Filter"
-      end
-
-      def introduced
-        Version.new(2,0,0)
-      end
-
-      def synth_name
-        "fx_lpf"
-      end
-
-
-
-      def doc
-        "Dampens the parts of the signal that are higher than the cutoff point (typically the crunchy fizzy harmonic overtones) and keeps the lower parts (typically the bass/mid of the sound). Choose a higher cutoff to keep more of the high frequences/treble of the sound and a lower cutoff to make the sound more dull and only keep the bass."
-      end
-
-
-
-      def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-          :cutoff => 100,
-          :cutoff_slide => 0,
-          :cutoff_slide_shape => 1,
-          :cutoff_slide_curve => 0,
-        }
-      end
-
-      def specific_arg_info
-        {
-
-
-        }
-      end
-    end
-
     class FXNormLPF < FXLPF
       def name
         "Normalised Low Pass Filter."
@@ -6152,45 +6602,6 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
 
       def doc
         "A low pass filter chained to a normaliser. Ensures that the signal is both filtered by a standard low pass filter and then normalised to ensure the amplitude of the final output is constant. A low pass filter will reduce the amplitude of the resulting signal (as some of the sound has been filtered out) the normaliser can compensate for this loss (although will also have the side effect of flattening all dynamics). See doc for lpf."
-      end
-    end
-
-    class FXHPF < FXInfo
-      def name
-        "High Pass Filter"
-      end
-
-      def introduced
-        Version.new(2,0,0)
-      end
-
-      def synth_name
-        "fx_hpf"
-      end
-
-      def doc
-        "Dampens the parts of the signal that are lower than the cutoff point (typically the bass of the sound) and keeps the higher parts (typically the crunchy fizzy harmonic overtones). Choose a lower cutoff to keep more of the bass/mid and a higher cutoff to make the sound more light and crispy."
-      end
-
-      def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-          :cutoff => 100,
-          :cutoff_slide => 0,
-          :cutoff_slide_shape => 1,
-          :cutoff_slide_curve => 0,
-        }
       end
     end
 
@@ -6230,24 +6641,12 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :level => 1,
           :level_slide => 0,
           :level_slide_shape => 1,
           :level_slide_curve => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -6290,25 +6689,12 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
+        super.merge({
           :krunch => 5,
           :krunch_slide => 0,
           :krunch_slide_shape => 1,
           :krunch_slide_curve => 0,
-
-        }
+        })
       end
       def specific_arg_info
         {
@@ -6347,19 +6733,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
+        super.merge({
           :window_size => 0.2,
           :window_size_slide => 0,
           :window_size_slide_shape => 1,
@@ -6376,7 +6750,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
           :time_dis_slide => 0,
           :time_dis_slide_shape => 1,
           :time_dis_slide_curve => 0,
-        }
+        })
       end
 
       def specific_arg_info
@@ -6472,24 +6846,12 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :distort => 0.5,
           :distort_slide => 0,
           :distort_slide_shape => 1,
-          :distort_slide_curve => 0,
-        }
+          :distort_slide_curve => 0
+        })
       end
 
       def specific_arg_info
@@ -6532,24 +6894,12 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :pan => 0,
           :pan_slide => 0,
           :pan_slide_shape => 1,
           :pan_slide_curve => 0,
-        }
+        })
       end
     end
 
@@ -6571,19 +6921,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
 
       def arg_defaults
-        {
-          :amp => 1,
-          :amp_slide => 0,
-          :amp_slide_shape => 1,
-          :amp_slide_curve => 0,
-          :mix => 1,
-          :mix_slide => 0,
-          :mix_slide_shape => 1,
-          :mix_slide_curve => 0,
-          :pre_amp => 1,
-          :pre_amp_slide => 0,
-          :pre_amp_slide_shape => 1,
-          :pre_amp_slide_curve => 0,
+        super.merge({
           :phase => 4,
           :phase_slide => 0,
           :phase_slide_shape => 1,
@@ -6610,7 +6948,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
           :feedback_slide_shape => 1,
           :feedback_slide_curve => 0,
           :invert_flange => 0
-        }
+        })
       end
 
       def specific_arg_info
@@ -6683,7 +7021,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
 
           :depth_slide =>
           {
-            :doc => generic_slide_doc(:delay),
+            :doc => generic_slide_doc(:depth),
             :validations => [v_positive(:depth_slide)],
             :modulatable => true,
             :bpm_scale => true
@@ -6730,6 +7068,89 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
       end
     end
 
+    class FXTremolo < FXInfo
+      def name
+        "Tremolo"
+      end
+
+      def introduced
+        Version.new(2,12,0)
+      end
+
+      def synth_name
+        "fx_tremolo"
+      end
+
+      def doc
+        "Modulate the volume of the sound."
+      end
+
+      def arg_defaults
+        super.merge({
+          :phase => 4,
+          :phase_slide => 0,
+          :phase_slide_shape => 1,
+          :phase_slide_curve => 0,
+          :phase_offset => 0,
+          :wave => 2,
+          :invert_wave => 0,
+          :depth => 5,
+          :depth_slide => 0,
+          :depth_slide_shape => 1,
+          :depth_slide_curve => 0
+        })
+      end
+
+      def specific_arg_info
+        {
+          :phase =>
+          {
+            :doc => "Phase duration in beats of tremolo modulation.",
+            :validations => [v_positive_not_zero(:phase)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :phase_slide =>
+          {
+            :doc => generic_slide_doc(:phase),
+            :validations => [v_positive(:phase_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          },
+
+          :wave =>
+          {
+            :doc => "Wave type - 0 saw, 1 pulse, 2 triangle, 3 sine, 4 cubic. Different waves will produce different tremolo modulation effects.",
+            :validations => [v_one_of(:wave, [0, 1, 2, 3, 4])],
+            :modulatable => true
+          },
+
+          :invert_wave =>
+          {
+            :doc => "Invert tremolo control waveform (i.e. flip it on the y axis). 0=uninverted wave, 1=inverted wave.",
+            :validations => [v_one_of(:invert_wave, [0, 1])],
+            :modulatable => true
+          },
+
+          :depth =>
+          {
+            :doc => "Tremolo depth - greater depths produce a more prominent effect.",
+            :validations => [v_between_inclusive(:depth, 0, 1)],
+            :modulatable => true
+          },
+
+          :depth_slide =>
+          {
+            :doc => generic_slide_doc(:depth),
+            :validations => [v_positive(:depth_slide)],
+            :modulatable => true,
+            :bpm_scale => true
+          }
+
+        }
+      end
+    end
     class BaseInfo
 
       @@grouped_samples =
@@ -6966,6 +7387,7 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
         :blade => SynthViolin.new,
         :piano => SynthPiano.new,
         :pluck => SynthPluck.new,
+        :tech_saws => TechSaws.new,
 
         :sound_in => SoundIn.new,
         :sound_in_stereo => SoundInStereo.new,
@@ -7034,7 +7456,12 @@ Use FX `:band_eq` with a negative db for the opposite effect - to attenuate a gi
         #:fx_chorus => FXChorus.new,
         :fx_octaver => FXOctaver.new,
         :fx_vowel => FXVowel.new,
-        :fx_flanger => FXFlanger.new
+        :fx_flanger => FXFlanger.new,
+        :fx_eq => FXEQ.new,
+        :fx_tremolo => FXTremolo.new,
+        :fx_record => FXRecord.new,
+        :fx_sound_out => FXSoundOut.new,
+        :fx_sound_out_stereo => FXSoundOutStereo.new
       }
 
       def self.get_info(synth_name)

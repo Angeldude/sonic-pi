@@ -14,16 +14,22 @@
 #++
 
 ## ---- Modify these to point to your system
-QSCINTILLA=/Users/sam/Downloads/tmp/QScintilla-gpl-2.9/Qt4Qt5
-QTBIN=/Users/sam/Development/Qt/5.4/clang_64/bin
-LIBQS=libqscintilla2.12.0.0.dylib
+QSCINTILLA=/Users/sam/Downloads/tmp/QScintilla_gpl-2.9.3.dev1606101834/Qt4Qt5
+QWT=/usr/local/qwt-6.1.2/
+QTBIN=/Users/sam/Development/Qt5.6.1/5.6/clang_64/bin
+#QTBIN=/Users/sam/Development/Qt5.7/5.7/clang_64/bin
+LIBQS=libqscintilla2.12.0.2.dylib
 LIBQS_LINK=libqscintilla2.12.dylib
+# QSCINTILLA="native/qscintilla"
+# QTBIN="native/qt5.5/bin"
+#LIBQS=libqscintilla2.12.0.0.dylib
+#LIBQS_LINK=libqscintilla2.12.dylib
 ## ----
 
-QMAKE=$QTBIN/qmake
-LREL=$QTBIN/lrelease
-MACDEPLOYQT=$QTBIN/macdeployqt
-LIBQS_PATH=$QSCINTILLA/$LIBQS
+QMAKE="$QTBIN/qmake"
+LREL="$QTBIN/lrelease"
+MACDEPLOYQT="$QTBIN/macdeployqt"
+LIBQS_PATH="$QSCINTILLA/$LIBQS"
 
 SP='Sonic Pi.app'
 
@@ -35,14 +41,15 @@ rm -rf build
 mkdir build
 
 # Generate automated docs
+../../server/native/osx/ruby/bin/ruby ../../server/bin/i18n-tool.rb -t
 cp -f ruby_help.tmpl ruby_help.h
 ../../server/native/osx/ruby/bin/ruby ../../server/bin/qt-doc.rb -o ruby_help.h
 
 # Generate i18n files
-$LREL SonicPi.pro
+"$LREL" SonicPi.pro
 
 # Build app
-$QMAKE -o Makefile SonicPi.pro
+"$QMAKE" -o Makefile SonicPi.pro
 make
 
 # Move to build
@@ -58,9 +65,12 @@ cp $LIBQS_PATH "$SP/Contents/MacOS/"
 $MACDEPLOYQT "$SP"
 
 # Put qscintilla dylib in Frameworks dir and symlink
-cd "$SP/Contents/Frameworks"
-mv ../MacOS/$LIBQS .
+cd "$SP/Contents/MacOS"
+# mv ../MacOS/$LIBQS .
 
+cp -R ~/Desktop/qwt.framework .
+
+echo `pwd`
 if [ ! -f $LIBQS_LINK ]; then
   ln -s $LIBQS $LIBQS_LINK
 fi

@@ -12,47 +12,12 @@
 # notice is included.
 #++
 
-raise "Sonic Pi requires Ruby 1.9.3+ to be installed. You are using version #{RUBY_VERSION}" if RUBY_VERSION < "1.9.3"
-
 ## This core file sets up the load path and applies any necessary monkeypatches.
 
 ## Ensure native lib dir is available
 require 'rbconfig'
 ruby_api = RbConfig::CONFIG['ruby_version']
-os = case RUBY_PLATFORM
-     when /.*arm.*-linux.*/
-       :raspberry
-     when /.*linux.*/
-       :linux
-     when /.*darwin.*/
-       :osx
-     when /.*mingw.*/
-       :windows
-     else
-       RUBY_PLATFORM
-     end
-ruby_gem_native_path = "#{File.expand_path("../rb-native", __FILE__)}"
-ruby_gem_api_path = "#{ruby_gem_native_path}/#{os}/#{ruby_api}"
 
-unless File.directory?(ruby_gem_api_path)
-  STDERR.puts "*** COULD NOT FIND RUBY GEMS REQUIRED BY SONIC PI ***"
-  STDERR.puts "Directory '#{ruby_gem_api_path}' not found."
-  STDERR.puts "Your ruby interpreter is '#{RbConfig.ruby}', supporting ruby api #{ruby_api}."
-  Dir.entries("#{ruby_gem_native_path}/#{os}/")
-    .select { |d| (File.directory?("#{ruby_gem_native_path}/#{os}/#{d}") && d != '.' && d != '..') }
-    .each do |installed_ruby_api|
-      STDERR.puts "The Sonic Pi on your computer was installed for ruby api #{installed_ruby_api}."
-    end
-  STDERR.puts "Please refer to the Sonic Pi install instructions."
-  STDERR.puts "For installation, you need to run 'app/server/bin/compile-extensions.rb'."
-  STDERR.puts "If you change or upgrade your ruby interpreter later, you may need to run it again."
-
-  raise "Could not access ruby gem directory"
-end
-
-$:.unshift ruby_gem_api_path
-
-require 'win32/process' if os == :windows
 
 ## Ensure all libs in vendor directory are available
 Dir["#{File.expand_path("../vendor", __FILE__)}/*/lib/"].each do |vendor_lib|
@@ -68,58 +33,196 @@ end
 require 'hamster/vector'
 require 'wavefile'
 
+os = case RUBY_PLATFORM
+     when /.*arm.*-linux.*/
+       :raspberry
+     when /.*linux.*/
+       :linux
+     when /.*darwin.*/
+       :osx
+     when /.*mingw.*/
+       :windows
+     else
+       RUBY_PLATFORM
+     end
+
+# special case for proctable lib
+sys_proctable_os = case os
+                   when :raspberry
+                     "linux"
+                   when :linux
+                     "linux"
+                   when :windows
+                     "windows"
+                   when :osx
+                     "darwin"
+                   end
+$:.unshift "#{File.expand_path("../vendor", __FILE__)}/sys-proctable-1.1.3/lib/#{sys_proctable_os}"
+
+
+$:.unshift "#{File.expand_path("../rb-native", __FILE__)}/#{os}/#{ruby_api}/"
+
+require 'win32/process' if os == :windows
+
+## Add aubio native library to ENV if not present (the aubio library needs to be told the location)
+native_lib_path = "#{File.expand_path("../native/#{os}/", __FILE__)}"
+ENV["AUBIO_LIB"] ||= Dir[native_lib_path + "/lib/libaubio*.{*dylib,so*,dll}"].first
+
+
+
+# Backport Ruby 2+ thread local variable syntax
+if RUBY_VERSION < "2"
+  class Thread
+    def thread_variable_get(n)
+      self[n]
+    end
+
+    def thread_variable_set(n, v)
+      self[n] = v
+    end
+
+    def thread_variables
+      self.keys
+    end
+  end
+
+  class Hash
+    def to_h
+      self
+    end
+  end
+end
+
+
+raise "Sonic Pi requires Ruby 1.9.3+ to be installed. You are using version #{RUBY_VERSION}" if RUBY_VERSION < "1.9.3"
+
+
+module SonicPi
+  module Core
+    class ThreadLocal
+      attr_reader :vars, :local_vars
+
+      def initialize(parent=nil, overrides={})
+        raise "ThreadLocal can only be initialized with nil or a parent ThreadLocal" unless parent.nil? || parent.is_a?(ThreadLocal)
+        @parent_visible = true
+
+        if parent
+          @parent_vars = parent.vars.merge(overrides)
+          @vars = parent.vars.merge(overrides)
+        else
+          @parent_vars = overrides
+          @vars = overrides
+        end
+
+        @local_vars = {}
+      end
+
+      def to_s
+        "<ThreadLocal @vars: #{@vars}, @local_vars: #{@local_vars}"
+      end
+
+      def set(name, val)
+        raise "Error setting Thread Local - value must be immutable. Got: #{val.inspect} for #{name.inspect}" unless val.sp_thread_safe?
+        @vars[name] = val
+        @local_vars.delete name
+        val
+      end
+
+      def reset!
+        @parent_visible = true
+        @vars = @parent_vars.clone
+        @local_vars = {}
+      end
+
+      def clear!
+        @parent_visible = false
+        @vars = {}
+        @local_vars = {}
+      end
+
+      # These values will not be inherited
+      def set_local(name, val)
+        @local_vars[name] = val
+        @vars.delete name
+        val
+      end
+
+      def get(name, default=nil)
+        if @local_vars.has_key? name
+          return @local_vars[name]
+        elsif @vars.has_key? name
+          return @vars[name]
+        elsif @parent_visible
+          return @parent_vars.fetch(name, default)
+        else
+          return default
+        end
+      end
+
+    end
+  end
+end
+
+
+
 module SonicPi
   module Core
     module SPRand
-      # use FHS directory scheme:
-      # check if Sonic Pi's ruby server is not running inside the
-      # user's home directory, but is installed in /usr/lib/sonic-pi
-      # on Linux from a distribution's package
-      random_numbers_path = File.dirname(__FILE__).start_with?("/usr/lib/sonic-pi") ? "/usr/share/sonic-pi" : "../../../etc"
       # Read in same random numbers as server for random stream sync
-      @@random_numbers = ::WaveFile::Reader.new(File.expand_path("#{random_numbers_path}/buffers/rand-stream.wav", __FILE__), ::WaveFile::Format.new(:mono, :float, 44100)).read(441000).samples.freeze
+      @@random_numbers = ::WaveFile::Reader.new(File.expand_path("../../../etc/buffers/rand-stream.wav", __FILE__), ::WaveFile::Format.new(:mono, :float, 44100)).read(441000).samples.freeze
+
+      def self.tl_seed_map(seed, idx=0)
+        {:sonic_pi_spider_random_gen_seed => seed,
+          :sonic_pi_spider_random_gen_idx => idx}
+      end
+
+      def self.__thread_locals(t = Thread.current)
+        tls = t.thread_variable_get(:sonic_pi_thread_locals)
+        tls = t.thread_variable_set(:sonic_pi_thread_locals, SonicPi::Core::ThreadLocal.new) unless tls
+        return tls
+      end
 
       def self.to_a
         @@random_numbers
       end
 
       def self.inc_idx!(increment=1, init=0)
-        ridx = Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_idx) || init
-        Thread.current.thread_variable_set :sonic_pi_spider_random_gen_idx, ridx + increment
+        ridx = __thread_locals.get(:sonic_pi_spider_random_gen_idx) || init
+        __thread_locals.set :sonic_pi_spider_random_gen_idx, ridx + increment
         ridx
       end
 
       def self.dec_idx!(decrement=1, init=0)
-        ridx = Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_idx) || init
-        Thread.current.thread_variable_set :sonic_pi_spider_random_gen_idx, ridx - decrement
+        ridx = __thread_locals.get(:sonic_pi_spider_random_gen_idx) || init
+        __thread_locals.set :sonic_pi_spider_random_gen_idx, ridx - decrement
         ridx
       end
 
       def self.set_seed!(seed, idx=0)
-        Thread.current.thread_variable_set :sonic_pi_spider_random_gen_seed, seed
-        Thread.current.thread_variable_set :sonic_pi_spider_random_gen_idx, idx
+        __thread_locals.set :sonic_pi_spider_random_gen_seed, seed
+        __thread_locals.set :sonic_pi_spider_random_gen_idx, idx
       end
 
       def self.set_idx!(idx)
-        Thread.current.thread_variable_set :sonic_pi_spider_random_gen_idx, idx
+        __thread_locals.set :sonic_pi_spider_random_gen_idx, idx
       end
 
       def self.get_seed_and_idx
-        [Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_seed),
-          Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_idx)]
+        [__thread_locals.get(:sonic_pi_spider_random_gen_seed),
+          __thread_locals.get(:sonic_pi_spider_random_gen_idx)]
       end
 
       def self.get_seed
-        Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_seed) || 0
+        __thread_locals.get(:sonic_pi_spider_random_gen_seed) || 0
       end
 
       def self.get_idx
-        Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_idx) || 0
+        __thread_locals.get(:sonic_pi_spider_random_gen_idx) || 0
       end
 
       def self.get_seed_plus_idx
-        (Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_idx) || 0) +
-          Thread.current.thread_variable_get(:sonic_pi_spider_random_gen_seed) || 0
+        (__thread_locals.get(:sonic_pi_spider_random_gen_idx) || 0) +
+          __thread_locals.get(:sonic_pi_spider_random_gen_seed) || 0
       end
 
       def self.rand!(max=1, idx=nil)
@@ -157,11 +260,18 @@ module SonicPi
     end
 
     module ThreadLocalCounter
+
+      def self.__thread_locals(t = Thread.current)
+        tls = t.thread_variable_get(:sonic_pi_thread_locals)
+        tls = t.thread_variable_set(:sonic_pi_thread_locals, SonicPi::Core::ThreadLocal.new) unless tls
+        return tls
+      end
+
       def self.get_or_create_counters
-        counters = Thread.current.thread_variable_get(:sonic_pi_core_thread_local_counters)
+        counters = __thread_locals.get(:sonic_pi_local_core_thread_local_counters)
         return counters if counters
         counters = {}
-        Thread.current.thread_variable_set(:sonic_pi_core_thread_local_counters, counters)
+        __thread_locals.set_local(:sonic_pi_local_core_thread_local_counters, counters)
         counters
       end
 
@@ -225,7 +335,7 @@ module SonicPi
       end
 
       def self.reset_all
-        Thread.current.thread_variable_set(:sonic_pi_core_thread_local_counters, {})
+        __thread_locals.set_local(:sonic_pi_local_core_thread_local_counters, {})
         nil
       end
     end
@@ -238,10 +348,53 @@ module SonicPi
     class EmptyVectorError < StandardError ; end
     class InvalidIndexError < StandardError ; end
 
+
+
+    class SPMap < Hamster::Hash
+      def initialize(*args)
+        super
+        res = self.all? {|k, v| k.sp_thread_safe? && v.sp_thread_safe?}
+        @sp_thread_safe = !!res
+      end
+
+      def sp_thread_safe?
+        @sp_thread_safe
+      end
+
+      def inspect
+        if self.empty?
+          "(map)"
+        else
+          s = "(map "
+          self.to_h.each do |k, v|
+            if k.is_a? Symbol
+              s << "#{k}: #{v.inspect}, "
+            else
+              s << "#{k.inspect} => #{v.inspect}, "
+            end
+          end
+          s.chomp!(", ")
+          s << ")"
+          return s
+        end
+      end
+
+      def to_s
+        inspect
+      end
+
+    end
+
     class SPVector < Hamster::Vector
       include TLMixin
       def initialize(list)
         super
+        res = self.all? {|el| el.sp_thread_safe?}
+        @thread_safe = !!res
+      end
+
+      def sp_thread_safe?
+        return @thread_safe
       end
 
       def ___sp_vector_name
@@ -303,11 +456,19 @@ module SonicPi
       end
 
       def ring
-        SonicPi::Core::RingVector.new(self)
+        if is_a?(SonicPi::Core::RingVector)
+          self
+        else
+          SonicPi::Core::RingVector.new(self)
+        end
       end
 
       def ramp
-        SonicPi::Core::RampVector.new(self)
+        if is_a?(SonicPi::Core::RampVector)
+          self
+        else
+          SonicPi::Core::RampVector.new(self)
+        end
       end
 
       def to_s
@@ -373,17 +534,16 @@ module SonicPi
         raise "pick requires n to be a number, got: #{n.inspect}" unless n.is_a? Numeric
 
         res = []
+
         if s
           raise "skip: opt needs to be a number, got: #{s.inspect}" unless s.is_a? Numeric
-          n.times do
-            SonicPi::Core::SPRand.inc_idx!(s)
-            res << self.choose
-          end
-        else
-          n.times do
-            res << self.choose
+          s.times do
+            self.choose
           end
         end
+
+        n.times { res << self.choose }
+
         res.ring
       end
 
@@ -438,11 +598,37 @@ module SonicPi
         "ramp"
       end
     end
+
+
+    # An immutable map which when used in a splat will
+    # yield its vals
+    class SPSplatMap < SPMap
+
+      def initialize(h)
+        raise "SPSplatMaps may only be initialised with a Hash. You supplied a #{h.class} with value #{h.inspect}" unless h.is_a?(Hash)
+        super
+
+        # as h is a standard Hash, the value insertion order is
+        # preserved at this point. By sticking it into an array, we
+        # guarantee preservation of this ofder after conversion to an
+        # immutable Map
+        @sp_orig_vals = h.values
+      end
+
+      def to_ary
+        @sp_orig_vals.to_ary
+      end
+    end
+
   end
 end
 
 
 class String
+  def sp_thread_safe?
+    frozen?
+  end
+
   def shuffle
     self.chars.to_a.shuffle.join
   end
@@ -453,18 +639,32 @@ class String
 end
 
 class Numeric
+  # Upper bound - will clamp the value
+  # to a value below max
   def max(other)
     return self if self <= other
     other
   end
 
+  # Minimum bound - will clamp the value
+  # to a value above min
   def min(other)
     return self if self >= other
     other
   end
+
+  # Max and minimum bound - will clamp other
+  # to a value below other and above -1 * other
+  def clamp(other)
+    self.max(other).min(other * -1)
+  end
 end
 
 class Symbol
+  def sp_thread_safe?
+    true
+  end
+
   def shuffle
     self.to_s.shuffle.to_sym
   end
@@ -475,6 +675,11 @@ class Symbol
 end
 
 class Float
+
+  def sp_thread_safe?
+    true
+  end
+
   def times(&block)
     self.to_i.times do |idx|
       yield idx.to_f
@@ -521,25 +726,13 @@ module Rubame
 end
 
 
-# Backport Ruby 2+ thread local variable syntax
-if RUBY_VERSION < "2"
-  class Thread
-    def thread_variable_get(n)
-      self[n]
-    end
-
-    def thread_variable_set(n, v)
-      self[n] = v
-    end
-
-    def thread_variables
-      self.keys
-    end
-  end
-end
 
 class Array
   include SonicPi::Core::TLMixin
+
+  def sp_thread_safe?
+    frozen? && self.all? {|el| el.sp_thread_safe?}
+  end
 
   def ring
     SonicPi::Core::RingVector.new(self)
@@ -553,21 +746,42 @@ class Array
     self[SonicPi::Core::SPRand.rand_i!(self.size)]
   end
 
-  def pick(n=nil)
+  def pick(n=nil, *opts)
+    # mangle args to extract nice behaviour
+    if !n.is_a?(Numeric) && opts.empty?
+      opts = n
+      n = nil
+    else
+      opts = opts[0]
+    end
+
+    if opts.is_a?(Hash)
+      s = opts[:skip]
+    else
+      s = nil
+    end
+
     n = @size unless n
     raise "pick requires n to be a number, got: #{n.inspect}" unless n.is_a? Numeric
 
     res = []
-    n.times do
-      res << self.choose
+    if s
+      raise "skip: opt needs to be a number, got: #{s.inspect}" unless s.is_a? Numeric
+      s.times do
+        self.choose
+      end
     end
+
+    n.times { res << self.choose }
+
     res
   end
+
 
   alias_method :__orig_sample__, :sample
   def sample(*args, &blk)
 
-    if Thread.current.thread_variable_get(:sonic_pi_spider_thread)
+    if Thread.current.thread_variable_get(:sonic_pi_thread_locals)
       self[SonicPi::Core::SPRand.rand!(self.size)]
     else
       __orig_sample__ *args, &blk
@@ -576,7 +790,7 @@ class Array
 
   alias_method :__orig_shuffle__, :shuffle
   def shuffle(*args, &blk)
-    if Thread.current.thread_variable_get(:sonic_pi_spider_thread)
+    if Thread.current.thread_variable_get(:sonic_pi_thread_locals)
       orig_seed, orig_idx = SonicPi::Core::SPRand.get_seed_and_idx
       SonicPi::Core::SPRand.set_seed!(SonicPi::Core::SPRand.rand_i!(441000))
       new_a = self.dup
@@ -595,7 +809,7 @@ class Array
 
   alias_method :__orig_shuffle_bang__, :shuffle!
   def shuffle!(*args, &blk)
-    if Thread.current.thread_variable_get(:sonic_pi_spider_thread)
+    if Thread.current.thread_variable_get(:sonic_pi_thread_locals)
       new_a = self.shuffle
       self.replace(new_a)
     else
@@ -604,11 +818,31 @@ class Array
   end
 end
 
+class Time
+  def sp_thread_safe?
+    frozen?
+  end
+end
 
+class Hash
+  def sp_thread_safe?
+    frozen? && all? {|k, v| k.sp_thread_safe? && v.sp_thread_safe?}
+  end
+end
 
 # Meta-glasses from our hero Why to help us
 # see more clearly..
 class Object
+
+  def sp_thread_safe?
+      self.is_a?(Numeric) ||
+      self.is_a?(Symbol) ||
+      self.is_a?(TrueClass) ||
+      self.is_a?(FalseClass) ||
+      self.is_a?(NilClass) ||
+      (self.is_a?(SonicPi::Core::SPVector) && self.all? {|el| el.sp_thread_safe?})
+  end
+
 
   def ring
     self.to_a.ring

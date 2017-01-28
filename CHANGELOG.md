@@ -1,4 +1,6 @@
 # History
+* [v2.11.1 'Hack'](#v2.11.1), 16th Dec, 2016
+* [v2.11 'Time Warp'](#v2.11), 3rd Nov, 2016
 * [v2.10 'Cowbell'](#v2.10), 15th April, 2016
 * [v2.9 'Venster'](#v2.9), 31st Dec, 2015
 * [v2.8 'Karlsruhe'](#v2.8), 20th Nov, 2015
@@ -8,8 +10,263 @@
 * [v2.4 'Defrost'](#v2.4), 11th Feb, 2015
 * [v2.3 'Bitcrush'](#v2.3), 28th Jan, 2015
 * [v2.2 'Slicer'](#v2.2), 18th Dec, 2014
+* [v2.1.1 'Firewall'](#v2.1.1), 25th Nov, 2014
 * [v2.1 'Core'](#v2.1), 21st Nov, 2014
 * [v2.0 'Phoenix'](#v2.0), 2nd Sept, 2014
+
+<a name="v2.11.1"></a>
+
+## Version 2.11.1 - 'Hack'
+*16th Dec, 2016*
+[(view commits)](https://github.com/samaaron/sonic-pi/commits/v2.11.1)
+
+This is primarily a maintainance release containing a number of bug
+fixes and minor tweaks. The feature set remains unchanged from `v2.11`.
+
+One of the core bugs fixed in this release is an issue with the return
+key within some Japanese layouts. Another important change is the
+unification of the font on all platforms to
+[Hack](http://sourcefoundry.org/hack/). This is from the same family as
+Menlo and Bitstream Vera (the previous fonts for Mac and Linux
+respectively) and a dramatic improvement to the Courier font previously
+used for Windows.
+
+### GUI
+
+* Move all platforms to the same font -
+  [Hack](http://sourcefoundry.org/hack/).
+* Improve initial log information and messages.
+* The scope axes are no longer shown by default for a cleaner look and
+  feel.
+
+### Docs
+
+* Add new MagPi article on sample stretching.
+
+### Bugfixes
+
+* Ensure `chord_invert`'s shift value is a whole number - otherwise it
+  is possible to get into an infinite recursion.
+* Ensure thread locals have correct default values on `clear`. When a
+  run is created, the thread is given a set of default thread
+  locals. Previously `clear` removed *all* thread locals. Now, we reset
+  the thread locals to the defaults for a brand new thread.
+* Fix line reported on syntax error.
+* Fix unknown synth error message.
+* `sync` can once again handle multiple cues correctly.
+* Fix boot issues for users that don't have a standard /etc/hosts file
+  that contains an entry for localhost.
+* `sample_duration` now handles onsets, slices and sustain.
+* Fix issue with return key not being recognised with Japanese
+  keyboards.
+* Fix sporadic flickering of current line on Raspberry Pi.
+* Fix errors in buffer 0 being reported as being from buffer 3.
+* Fix scrollbar background colour on Windows in dark mode.
+* Improve error message reported when required ports are not available
+  at boot.
+* Fix issue with calling `control` on a chord group.  
+* Fix `rand` and `rand_i` to honour their arguments.
+
+<a name="v2.11"></a>
+
+## Version 2.11 - 'Time Warp'
+*3rd Nov, 2016*
+[(view commits)](https://github.com/samaaron/sonic-pi/commits/v2.11.0)
+
+This release is the biggest and most adventurous release yet. There are
+as many (invisible) modifications and improvements to the internal
+systems as there are new external features that you can see and play
+with. The aim was to create a solid foundation for new and exciting
+features both in this release and in preparation for future releases.
+
+We also open our arms to welcome two new Core Team members - Luis Lloret
+and Adrian Cheater. Both have made generous and substantial
+contributions to this release. Thank-you. Sadly we also say farewell to
+Jeremy Weatherford. Please extend your kind thoughts and gratitude to
+Jeremy for all of his contributions - in particular for turning the
+Windows release from a possibility into a reality. Luckily Luis has
+kindly stepped in to maintain the Windows installer.
+ 
+The main visible feature is the new scope visualisers. The overall audio
+output can now be visually monitored by one of three wave form
+visualisers. Firstly there is the individual left and right channels,
+next is a single mono scope which is mixed down from the stereo channels
+using RMS and finally there is a Lissajous scope which displays phase
+differences between the left and right channels. Typically the mono
+output will be most useful. Use the preferences pane to hide and show
+each of these scopes. All of them may be viewed at the same time if
+necessary. Thanks to Adrian Cheater for the core work behind this
+feature.
+
+We now have support for multi-channel input (up to 16 channels) via the
+new `sound_in*` synths for systems that have audio in. This opens up the
+possibility to use Sonic Pi as an FX unit for vocals, guitars and any
+other audio source.
+
+Another exciting new feature is the sample opt `onset:` - which lets you
+play a specific percussive part of a sample. This uses an automatic
+onset detection algorithm to determine all the points in the sample that
+go from quiet to loud quickly such as a drum, synth or bass hit. For
+example, this allows you to take a complex drum sample and trigger each
+of the individual drums in your own order and to your own timing.
+
+Finally, translations are now crowd-sourced and small or large
+contributions for any language can be made here:
+`https://hosted.weblate.org/projects/sonic-pi/`. If your language isn't
+yet available or you would like to improve things, please join in the
+effort. Thanks to Hanno Zulla for making this possible.
+
+
+### Breaking Changes
+ 
+* `sample` now supports the opt `path:` which enables the sample's path
+  to be overridden.
+* `use_sample_pack` is now deprecated and no longer available. Consider
+  using the new filter system. See documentation for `sample` for more
+  details.
+* `current_sample_pack` is now deprecated and no longer available.
+* `inspect` has been removed. (Standard printing now calls
+  `Object#inspect` by default)
+* `load_sample` now only loads the first matched sample. `load_samples`
+  now loads all matched samples.
+* Remove SuperCollider server automatic reboot system as it was badly
+  conflicting with machines that went into a 'sleep state' (for example,
+  when a laptop is closed). The fn `reboot` is still supported and may
+  still be triggered manually if required.
+* Calls to `play`, `synth` and `sample` now consume all their arguments
+  before testing to see if the synth should be triggered. This ensures
+  all declared rands are consumed. This change might therefore
+  potentially modify your random stream consumption. Consider using
+  `rand_back` or `rand_skip` to re-align the stream if necessary.
+* New threads now start with a fresh set of tick counters and a new
+  random stream.
+* It is no longer possible to use lambdas as values for synth
+  defaults. This is because synth defaults are shared across thread
+  boundaries and there is now a new safety system that only allows
+  immutable/serialisable values to be used. Unfortunately Ruby has no
+  notion of a 'pure' function and each lambda captures over its
+  environment and therefore may contain free variables pointing to
+  mutable data. A replacement system for describing a simple set of pure
+  functions is being designed.
+
+
+### New Fns
+
+* `reset` - resets the user's thread locals (such as ticks and rand
+  stream index) to the snapshot of the state as recorded at the start of
+  the current thread.
+* `clear` - clears all the user's thread locals to a blank state.
+* `time_warp`- allows whole blocks of code to be shifted forward or
+  backwards in time up to the value of `current_sched_ahead_time`.
+* `rand_look` - generate a random number without consuming a rand by
+  looking ahead in the random stream.
+* `rand_i_look` - generate a random integer without consuming a rand by
+  looking ahead in the random stream.
+* `run_file` - Runs the contents of file at path as if it was in the
+  current buffer.
+* `run_code` - Runs the contents of the specified string as if it was in
+  the current buffer.
+* `Numeric#clamp` - max and minimum bound (will clamp self to a value <=
+  other and >= -1*other
+* `set_recording_bit_depth!` - set the bit depth for WAV files generated
+  by recording the audio. Default is 16 bits, and can now be set to one
+  of 8, 16, 24 and 32. Larger bit depths will result in better quality
+  audio files but also much larger file sizes for the same duration.
+* `scsynth_info` - obtain information about the running audio synthesis
+  server SuperCollider such as the number of available busses and
+  buffers.
+
+
+### Synths & FX
+* New synth `:tech_saws` - an implementation of a slightly modified
+  supersaw.
+* New synth `:sound_in` - reads audio from the sound card.
+* New synth `:sound_in_stereo` - reads audio from the sound card.
+* All FX now have a `pre_mix:` opt. This allows the audio flow to
+  completely bypass a given FX (unlike `mix:` which passes the audio
+  through the FX but modifies the amplitude afterwards).
+* Teach `control` to manipulate the last triggered synth by default. For
+  example, `control amp: 3` will set the `amp:` opt of the last
+  triggered synth to 3. However, `control foo, amp: 3` will still
+  specifically control synth `foo`.
+
+
+### Samples
+
+* New opt `slice:` - lets you play a specific slice of a sample. The
+  default number of slices is 16 which may be changed with the
+  `num_slices:` opt. Sample is divided equally into the number of slices
+  without regard for audio content and onset points.  The `slice:` opt
+  also works with `pick` for triggering random sample slices: `sample
+  :loop_amen, slice: pick`.
+* New opt `onset:` - lets you play a specific percussive part of a
+  sample. Uses automatic onset detection to determine the points in the
+  sample that go from quiet to loud quickly. Unlike `slice:`, `onset:`
+  does not necessarily divide a sample into equal onsets - some onsets
+  will be smaller or bigger than others and the number of onsets is
+  determined by the algorithm and isn't known in advance.
+
+
+### GUI
+
+* New scope visualisers.
+* Allow files to be dragged from the OS into the text area. This inserts
+  the file/folder name as a string.
+* GUI now remembers the last directory you saved or opened a file
+  to/from as the default location for next time.
+* Swap align button for a scope button. Given that alignment now happens
+  automatically, a specific button seems somewhat redundant. Instead we
+  now have a button for toggling the visibility of the scope(s).
+* Loading multiple samples simultaneously is now much faster.
+* Preferences have been slightly re-organised.
+* Preferences now has a Master volume slider which controls Sonic Pi's
+  audio amplitude independently from the system volume.
+* All buttons now display status message + shortcut where available.
+* Enable app transparency slider for Windows.
+* Dark and light theme colours have been slightly polished and unified
+  to use the same logic.
+* On multi-screen systems, fullscreen mode now defaults to the app's
+  current screen.
+
+
+### Documentation
+
+* Translations are now crowd-sourced. See:
+  `https://hosted.weblate.org/projects/sonic-pi/`
+* Improve docstring for `live_loop`.
+* Add 3 new MagPi articles on amplitude modulation, performance and practice techniques.
+* Add missing `pulse_width:` opt to flanger FX doc.
+
+
+### Improvements
+
+* Improve log messages written to `~/.sonic-pi/log`
+* Improve booting on Mac in the case that the audio card's rate can't be
+  determined.
+* Massively improve boot stability on Windows.
+* Improve error message for `play_chord` when notes isn't list like.
+* The number of samples that may be loaded at any one time has been
+  increased from 1000 to 4000. However, memory limitations still apply
+  (4000 1MB samples will require 4000MB of free system memory)
+* `pick` now returns a lambda if no list is given as the first argument
+  (which makes it useful for using with sample's `onset:` and `slice:`
+  opts.
+* Audio server is now paused when app is not in use - reducing CPU load
+  and battery consumption.
+* Error messages now report names matching the editor tabs such as `buffer 0`.
+
+### Bugfixes
+
+* Decrease duration of `:loop_tabla` so that it correctly loops. (Length
+  reduced to 10.674 seconds).
+* Enforce UTF-8 encoding of all incoming text.
+* Fix `:reverb` FX's `mix:` opt to ensure it's in the range 0 to 1.
+* `sample nil` now no longer plays a sample - it was incorrectly
+  defaulting to the first built-in sample (`:ambi_choir`)
+* `pick`'s `skip:` opt now works as expected: `pick(5).drop(1) == pick(5, skip: 1)`
+* `sample` now prints a 'no sample found' message with both `sample nil` and `sample []` rather than incorrectly playing the first built-in wav file.
+* Limit `:piano` synth to notes less than 231 as higher values crash the audio server.
+
 
 <a name="v2.10"></a>
 
@@ -115,7 +372,7 @@ Now go and get your live code on!
 * Add new `:tabla_` sample group with a range of tabla drum sounds.
 * Add new `:vinyl_` sample group with a range of vinyl scratches and
   hisses.
-* Add new samples: `:drum_cowbell`, `:drum_roll`, `:misc_cros`,
+* Add new samples: `:drum_cowbell`, `:drum_roll`, `:misc_crow`,
   `:misc_cineboom`, `:perc_swash`, `:perc_till`, `:loop_safari`,
   `:loop_tabla`.
 
@@ -946,7 +1203,7 @@ and echoes.
 * Ensure `live_loop`'s no-sleep detector works within nested `with_fx` blocks
 * `chord` now returns a ring.
 
-## Version 2.1.1
+## Version 2.1.1 - 'Firewall'
 *Tuesday 25th November, 2014*
 [(view commits)](https://github.com/samaaron/sonic-pi/commits/v2.1.1)
 
